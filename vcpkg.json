@@ -1,0 +1,11 @@
+{
+  "name": "collisions",
+  "version-string": "1.0.0",
+  "dependencies": [
+    "glm",
+    "imgui",
+    "sdl2",
+    "sdl2-gfx"
+  ],
+  "builtin-baseline": "47205630845bd49eaf16cdfb757cf9dfba144c52"
+}
