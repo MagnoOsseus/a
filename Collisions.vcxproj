@@ -143,6 +143,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\CLI.cpp" />
     <ClCompile Include="src\CSpaceRefiner.cpp" />
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\App.cpp" />
@@ -152,6 +153,7 @@
     <ClCompile Include="src\imgui_backends\imgui_impl_sdlrenderer2.cpp" />
     <ClInclude Include="include\App.h" />
     <ClInclude Include="include\AABB.h" />
+    <ClInclude Include="include\CLI.h" />
     <ClInclude Include="include\CSpaceRefiner.h" />
     <ClInclude Include="include\IDrawable.h" />
     <ClInclude Include="include\Object.h" />
