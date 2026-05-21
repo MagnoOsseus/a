@@ -12,6 +12,7 @@ find_package(sdl2-gfx CONFIG REQUIRED)
 add_executable(${PROJECT_NAME}
     src/main.cpp
     src/App.cpp
+    src/CLI.cpp
     src/Object.cpp
     src/Grid.cpp
     src/CSpaceRefiner.cpp
