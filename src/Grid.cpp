@@ -5,586 +5,454 @@
 #include <cmath>
 #include <algorithm>
 
-namespace
+// --- Helpers ----------------------------------------------------------------
+
+namespace {
+
+// True if outer AABB fully contains inner AABB
+inline bool ContainsAABB(const AABB& outer, const AABB& inner)
 {
-constexpr std::size_t CellIndex(int col, int row, int cols)
-{
-    return static_cast<std::size_t>(row) * static_cast<std::size_t>(cols) + static_cast<std::size_t>(col);
+    return outer.min.x <= inner.min.x && outer.min.y <= inner.min.y
+        && outer.max.x >= inner.max.x && outer.max.y >= inner.max.y;
 }
-}
 
-// --- Public -------------------------------------------------------------
+} // namespace
 
-// Rebuild the grid and rasterize all objects onto it
-// Dynamic objects are rotated by angleDegrees before rasterization
-void Grid::Build(float screenW, float screenH, float cellSize, const std::vector<Object>& objects, Vec2 origin, float angleDegrees)
+// --- Public -----------------------------------------------------------------
+
+void Grid::Build(float screenW, float screenH, float minCellSize,
+                 const std::vector<Object>& objects, Vec2 origin,
+                 float angleDegrees)
 {
-    m_width  = screenW;
-    m_height = screenH;
-    m_cellSize = cellSize;
-    m_originX  = origin.x;
-    m_originY  = origin.y;
+    m_width       = screenW;
+    m_height      = screenH;
+    m_minCellSize = minCellSize;
+    m_originX     = origin.x;
+    m_originY     = origin.y;
+    m_hasCSpace   = false;
+    m_cspaceRoot.reset();
 
-    // Snap grid lines to the origin
-    float rx = std::fmod(origin.x, cellSize);
-    if (rx < 0) rx += cellSize;
-    float ry = std::fmod(origin.y, cellSize);
-    if (ry < 0) ry += cellSize;
-    m_startX = rx - cellSize;
-    m_startY = ry - cellSize;
+    // Snap root to the grid aligned with the origin (same logic as before)
+    float rx = std::fmod(origin.x, minCellSize);
+    if (rx < 0.0f) rx += minCellSize;
+    float ry = std::fmod(origin.y, minCellSize);
+    if (ry < 0.0f) ry += minCellSize;
+    m_startX = rx - minCellSize;
+    m_startY = ry - minCellSize;
 
-    int newCols = static_cast<int>(std::ceil((screenW - m_startX) / cellSize));
-    int newRows = static_cast<int>(std::ceil((screenH - m_startY) / cellSize));
+    // Create root node covering the screen area
+    m_root = std::make_unique<QTNode>();
+    m_root->bounds = {
+        { m_startX, m_startY },
+        { screenW,  screenH  }
+    };
 
-    // Reset C-Space if grid size changed
-    if (newCols != m_cols || newRows != m_rows) {
-        m_cspaceSafe.clear();
-        m_cspaceUnsafe.clear();
-    }
-
-    m_cols = newCols;
-    m_rows = newRows;
-
-    const size_t totalCells = static_cast<size_t>(m_cols) * static_cast<size_t>(m_rows);
-
-    m_staticOccupied.assign(totalCells, false);
-    m_dynamicOccupied.assign(totalCells, false);
-    m_staticInner.assign(totalCells, false);
-    m_dynamicInner.assign(totalCells, false);
-    m_staticGray.assign(totalCells, false);
-    m_dynamicGray.assign(totalCells, false);
-    ResetSpatialIndex();
-
-    // Mark which cells each object covers (rotate dynamic objects first)
+    // Rasterize every object into the quadtree
     for (const auto& obj : objects) {
+        std::vector<Vec2> worldVerts;
         if (obj.IsDynamic()) {
             Object rotated = obj.GetRotated(angleDegrees);
-            RasterizeObject(rotated);
+            if (rotated.GetShapeType() != ShapeType::Circle)
+                worldVerts = rotated.GetWorldVertices();
+            RasterizeObject(m_root.get(), rotated, worldVerts);
         } else {
-            RasterizeObject(obj);
+            if (obj.GetShapeType() != ShapeType::Circle)
+                worldVerts = obj.GetWorldVertices();
+            RasterizeObject(m_root.get(), obj, worldVerts);
         }
     }
-
-    SyncOccupancyArrays();
 }
 
 void Grid::Clear()
 {
-    m_cellEntries.clear();
-    m_occupancyTree.reset();
-    m_staticOccupied.clear();
-    m_dynamicOccupied.clear();
-    m_staticInner.clear();
-    m_dynamicInner.clear();
-    m_staticGray.clear();
-    m_dynamicGray.clear();
-    m_cspaceSafe.clear();
-    m_cspaceUnsafe.clear();
-    m_cols = 0;
-    m_rows = 0;
+    m_root.reset();
+    m_cspaceRoot.reset();
+    m_hasCSpace = false;
 }
 
-// Draw grid cells colored by what occupies them
+// --- Draw -------------------------------------------------------------------
+
 void Grid::Draw(SDL_Renderer* renderer) const
 {
-    if (m_cols == 0 || m_rows == 0) return;
-
-    for (int row = 0; row < m_rows; ++row) {
-        for (int col = 0; col < m_cols; ++col) {
-            Sint16 x1 = static_cast<Sint16>(m_startX + col * m_cellSize);
-            Sint16 y1 = static_cast<Sint16>(m_startY + row * m_cellSize);
-            Sint16 x2 = static_cast<Sint16>(m_startX + (col + 1) * m_cellSize);
-            Sint16 y2 = static_cast<Sint16>(m_startY + (row + 1) * m_cellSize);
-
-            size_t idx = static_cast<size_t>(row) * m_cols + col;
-            bool sOcc   = m_staticOccupied[idx];
-            bool dOcc   = m_dynamicOccupied[idx];
-            bool sInner = m_staticInner[idx];
-            bool dInner = m_dynamicInner[idx];
-            bool sGray  = m_staticGray[idx];
-            bool dGray  = m_dynamicGray[idx];
-
-            if (sOcc && dOcc) {
-                // Both objects overlap in this cell
-                if (sGray || dGray) {
-                    // At least one is a boundary cell → orange boundary
-                    boxRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 80);
-                    rectangleRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 220);
-                } else {
-                    // Both interiors → solid orange
-                    boxRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 120);
-                    rectangleRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 220);
-                }
-            } else if (sOcc) {
-                if (sGray) {
-                    // Gray: static boundary
-                    boxRGBA(renderer, x1, y1, x2, y2, 255, 255, 255, 30);
-                    rectangleRGBA(renderer, x1, y1, x2, y2, 0, 200, 0, 200);
-                } else {
-                    // Black: static interior
-                    boxRGBA(renderer, x1, y1, x2, y2, 0, 255, 0, 60);
-                    rectangleRGBA(renderer, x1, y1, x2, y2, 0, 255, 0, 120);
-                }
-            } else if (dOcc) {
-                if (dGray) {
-                    // Gray: dynamic boundary
-                    boxRGBA(renderer, x1, y1, x2, y2, 255, 255, 255, 30);
-                    rectangleRGBA(renderer, x1, y1, x2, y2, 0, 200, 200, 200);
-                } else {
-                    // Black: dynamic interior
-                    boxRGBA(renderer, x1, y1, x2, y2, 0, 255, 255, 60);
-                    rectangleRGBA(renderer, x1, y1, x2, y2, 0, 255, 255, 120);
-                }
-            } else {
-                // White: exterior
-                rectangleRGBA(renderer, x1, y1, x2, y2, 50, 50, 50, 40);
-            }
-        }
-    }
+    if (!m_root) return;
+    TraverseDraw(m_root.get(), renderer);
 }
 
-// --- Configuration Space ------------------------------------------------
-
-void Grid::ComputeCSpace()
+// static
+void Grid::TraverseDraw(const QTNode* node, SDL_Renderer* renderer)
 {
-    const size_t total = static_cast<size_t>(m_cols) * m_rows;
-    m_cspaceSafe.assign(total, false);
+    if (!node) return;
 
-    // Gather dynamic and static cell positions
-    std::vector<std::pair<int, int>> dynCells;
-    bool hasStatic = false;
-
-    for (int r = 0; r < m_rows; ++r) {
-        for (int c = 0; c < m_cols; ++c) {
-            size_t idx = static_cast<size_t>(r) * m_cols + c;
-            if (m_dynamicOccupied[idx])
-                dynCells.emplace_back(c, r);
-            if (m_staticOccupied[idx])
-                hasStatic = true;
-        }
-    }
-
-    if (dynCells.empty()) return;
-
-    // No obstacles means everywhere is safe
-    if (!hasStatic) {
-        m_cspaceSafe.assign(total, true);
+    if (!node->IsLeaf()) {
+        for (const auto& child : node->children)
+            TraverseDraw(child.get(), renderer);
         return;
     }
 
-    // Grow static cells by 1 in each direction (Minkowski-ish)
-    std::vector<bool> expandedStatic(total, false);
-    for (int r = 0; r < m_rows; ++r) {
-        for (int c = 0; c < m_cols; ++c) {
-            if (!m_staticOccupied[static_cast<size_t>(r) * m_cols + c])
-                continue;
-            for (int dr = -1; dr <= 1; ++dr) {
-                for (int dc = -1; dc <= 1; ++dc) {
-                    int nr = r + dr;
-                    int nc = c + dc;
-                    if (nr >= 0 && nr < m_rows && nc >= 0 && nc < m_cols)
-                        expandedStatic[static_cast<size_t>(nr) * m_cols + nc] = true;
-                }
-            }
+    bool sOcc = node->staticOccupied;
+    bool dOcc = node->dynamicOccupied;
+    if (!sOcc && !dOcc) return; // empty leaf – no drawing
+
+    bool sGray = node->staticGray;
+    bool dGray = node->dynamicGray;
+
+    Sint16 x1 = static_cast<Sint16>(node->bounds.min.x);
+    Sint16 y1 = static_cast<Sint16>(node->bounds.min.y);
+    Sint16 x2 = static_cast<Sint16>(node->bounds.max.x);
+    Sint16 y2 = static_cast<Sint16>(node->bounds.max.y);
+
+    if (sOcc && dOcc) {
+        if (sGray || dGray) {
+            boxRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 80);
+            rectangleRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 220);
+        } else {
+            boxRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 120);
+            rectangleRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 220);
         }
-    }
-
-    // Use the dynamic object's centroid as reference point
-    float refX = 0.0f, refY = 0.0f;
-    for (const auto& [c, r] : dynCells) {
-        refX += c;
-        refY += r;
-    }
-    refX /= static_cast<float>(dynCells.size());
-    refY /= static_cast<float>(dynCells.size());
-    int refC = static_cast<int>(std::round(refX));
-    int refR = static_cast<int>(std::round(refY));
-    m_refScreenPos = { m_startX + refC * m_cellSize, m_startY + refR * m_cellSize };
-
-    // First pass: check if placing the object here causes a collision
-    for (int tr = 0; tr < m_rows; ++tr) {
-        int dy = tr - refR;
-        for (int tc = 0; tc < m_cols; ++tc) {
-            int dx = tc - refC;
-
-            bool collision = false;
-            for (const auto& [dc, dr] : dynCells) {
-                int nc = dc + dx;
-                int nr = dr + dy;
-                if (nc >= 0 && nc < m_cols && nr >= 0 && nr < m_rows
-                    && expandedStatic[static_cast<size_t>(nr) * m_cols + nc]) {
-                    collision = true;
-                    break;
-                }
-            }
-
-            if (!collision)
-                m_cspaceSafe[static_cast<size_t>(tr) * m_cols + tc] = true;
+    } else if (sOcc) {
+        if (sGray) {
+            boxRGBA(renderer, x1, y1, x2, y2, 255, 255, 255, 30);
+            rectangleRGBA(renderer, x1, y1, x2, y2, 0, 200, 0, 200);
+        } else {
+            boxRGBA(renderer, x1, y1, x2, y2, 0, 255, 0, 60);
+            rectangleRGBA(renderer, x1, y1, x2, y2, 0, 255, 0, 120);
         }
-    }
-
-    // Second pass: definite collisions using only inner cells
-    m_cspaceUnsafe.assign(total, false);
-
-    std::vector<std::pair<int, int>> dynInnerCells;
-    bool hasStaticInner = false;
-    for (int r = 0; r < m_rows; ++r) {
-        for (int c = 0; c < m_cols; ++c) {
-            size_t idx = static_cast<size_t>(r) * m_cols + c;
-            if (m_dynamicInner[idx])
-                dynInnerCells.emplace_back(c, r);
-            if (m_staticInner[idx])
-                hasStaticInner = true;
-        }
-    }
-
-    if (!dynInnerCells.empty() && hasStaticInner) {
-        for (int tr = 0; tr < m_rows; ++tr) {
-            int dy = tr - refR;
-            for (int tc = 0; tc < m_cols; ++tc) {
-                int dx = tc - refC;
-
-                bool collision = false;
-                for (const auto& [dc, dr] : dynInnerCells) {
-                    int nc = dc + dx;
-                    int nr = dr + dy;
-                    if (nc >= 0 && nc < m_cols && nr >= 0 && nr < m_rows
-                        && m_staticInner[static_cast<size_t>(nr) * m_cols + nc]) {
-                        collision = true;
-                        break;
-                    }
-                }
-
-                if (collision)
-                    m_cspaceUnsafe[static_cast<size_t>(tr) * m_cols + tc] = true;
-            }
+    } else { // dOcc
+        if (dGray) {
+            boxRGBA(renderer, x1, y1, x2, y2, 255, 255, 255, 30);
+            rectangleRGBA(renderer, x1, y1, x2, y2, 0, 200, 200, 200);
+        } else {
+            boxRGBA(renderer, x1, y1, x2, y2, 0, 255, 255, 60);
+            rectangleRGBA(renderer, x1, y1, x2, y2, 0, 255, 255, 120);
         }
     }
 }
 
-// Draw C-Space results (green=safe, red=collision)
+// --- Configuration Space ----------------------------------------------------
+
+void Grid::ComputeCSpace()
+{
+    if (!m_root) return;
+
+    std::vector<AABB> dynOcc, dynInn, statOcc, statInn;
+    CollectLeaves(m_root.get(), dynOcc, dynInn, statOcc, statInn);
+
+    if (dynOcc.empty()) return;
+
+    // Reference point: area-weighted centroid of dynamic occupied leaves
+    float totalArea = 0.0f;
+    float refX = 0.0f, refY = 0.0f;
+    for (const auto& b : dynOcc) {
+        float area = b.Width() * b.Height();
+        float cx   = (b.min.x + b.max.x) * 0.5f;
+        float cy   = (b.min.y + b.max.y) * 0.5f;
+        refX += cx * area;
+        refY += cy * area;
+        totalArea += area;
+    }
+    if (totalArea > 0.0f) {
+        refX /= totalArea;
+        refY /= totalArea;
+    }
+    m_refScreenPos = { refX, refY };
+
+    // Precompute Minkowski obstacle AABBs.
+    // For a translation t, dynamic leaf d shifted by (t - refPos) overlaps static leaf s
+    // iff  t  ∈  [ s.min − d.max + refPos,  s.max − d.min + refPos ]
+    std::vector<AABB> minkConservative; // dynOcc × statOcc
+    minkConservative.reserve(dynOcc.size() * statOcc.size());
+    for (const auto& d : dynOcc) {
+        for (const auto& s : statOcc) {
+            AABB mk = {
+                { s.min.x - d.max.x + refX, s.min.y - d.max.y + refY },
+                { s.max.x - d.min.x + refX, s.max.y - d.min.y + refY }
+            };
+            if (mk.min.x < mk.max.x && mk.min.y < mk.max.y)
+                minkConservative.push_back(mk);
+        }
+    }
+
+    // Definite collision: dynInn × statInn
+    std::vector<AABB> minkDefinite;
+    minkDefinite.reserve(dynInn.size() * statInn.size());
+    for (const auto& d : dynInn) {
+        for (const auto& s : statInn) {
+            AABB mk = {
+                { s.min.x - d.max.x + refX, s.min.y - d.max.y + refY },
+                { s.max.x - d.min.x + refX, s.max.y - d.min.y + refY }
+            };
+            if (mk.min.x < mk.max.x && mk.min.y < mk.max.y)
+                minkDefinite.push_back(mk);
+        }
+    }
+
+    // Build CSpace tree
+    m_cspaceRoot = std::make_unique<QTNode>();
+    m_cspaceRoot->bounds = m_root->bounds;
+
+    if (statOcc.empty()) {
+        // No obstacles: the entire C-Space is safe
+        m_cspaceRoot->cspaceSafe = true;
+    } else {
+        BuildCSpaceNode(m_cspaceRoot.get(), minkConservative, minkDefinite);
+    }
+
+    m_hasCSpace = true;
+}
+
+// static
+void Grid::CollectLeaves(const QTNode* node,
+                         std::vector<AABB>& dynOcc,
+                         std::vector<AABB>& dynInn,
+                         std::vector<AABB>& statOcc,
+                         std::vector<AABB>& statInn)
+{
+    if (!node) return;
+    if (node->IsLeaf()) {
+        if (node->dynamicOccupied) dynOcc.push_back(node->bounds);
+        if (node->dynamicInner)    dynInn.push_back(node->bounds);
+        if (node->staticOccupied)  statOcc.push_back(node->bounds);
+        if (node->staticInner)     statInn.push_back(node->bounds);
+        return;
+    }
+    for (const auto& child : node->children)
+        CollectLeaves(child.get(), dynOcc, dynInn, statOcc, statInn);
+}
+
+void Grid::BuildCSpaceNode(QTNode* node,
+                           const std::vector<AABB>& minkConservative,
+                           const std::vector<AABB>& minkDefinite)
+{
+    const AABB& b = node->bounds;
+
+    // Are any conservative obstacles relevant for this node?
+    bool anyIntersect = false;
+    for (const auto& mk : minkConservative) {
+        if (b.Intersects(mk)) { anyIntersect = true; break; }
+    }
+    if (!anyIntersect) {
+        node->cspaceSafe = true;
+        return;
+    }
+
+    // Is this node entirely inside a definite obstacle?
+    for (const auto& mk : minkDefinite) {
+        if (ContainsAABB(mk, b)) {
+            node->cspaceUnsafe = true;
+            return;
+        }
+    }
+
+    // Can we subdivide?
+    float halfW = b.Width()  * 0.5f;
+    float halfH = b.Height() * 0.5f;
+    if (halfW >= m_minCellSize && halfH >= m_minCellSize) {
+        for (int q = 0; q < 4; ++q) {
+            node->children[q] = std::make_unique<QTNode>();
+            node->children[q]->bounds = ChildBounds(b, q);
+        }
+        for (int q = 0; q < 4; ++q)
+            BuildCSpaceNode(node->children[q].get(), minkConservative, minkDefinite);
+        return;
+    }
+
+    // Minimum size reached: leave as uncertain (neither flag set)
+}
+
 void Grid::DrawCSpace(SDL_Renderer* renderer) const
 {
-    if (m_cols == 0 || m_rows == 0) return;
+    if (!m_cspaceRoot) return;
+    TraverseDrawCSpace(m_cspaceRoot.get(), renderer);
+}
 
-    bool hasSafe   = !m_cspaceSafe.empty();
-    bool hasUnsafe = !m_cspaceUnsafe.empty();
+// static
+void Grid::TraverseDrawCSpace(const QTNode* node, SDL_Renderer* renderer)
+{
+    if (!node) return;
 
-    for (int row = 0; row < m_rows; ++row) {
-        for (int col = 0; col < m_cols; ++col) {
-            Sint16 x1 = static_cast<Sint16>(m_startX + col * m_cellSize);
-            Sint16 y1 = static_cast<Sint16>(m_startY + row * m_cellSize);
-            Sint16 x2 = static_cast<Sint16>(m_startX + (col + 1) * m_cellSize);
-            Sint16 y2 = static_cast<Sint16>(m_startY + (row + 1) * m_cellSize);
+    if (!node->IsLeaf()) {
+        for (const auto& child : node->children)
+            TraverseDrawCSpace(child.get(), renderer);
+        return;
+    }
 
-            rectangleRGBA(renderer, x1, y1, x2, y2, 50, 50, 50, 40);
+    Sint16 x1 = static_cast<Sint16>(node->bounds.min.x);
+    Sint16 y1 = static_cast<Sint16>(node->bounds.min.y);
+    Sint16 x2 = static_cast<Sint16>(node->bounds.max.x);
+    Sint16 y2 = static_cast<Sint16>(node->bounds.max.y);
 
-            size_t idx = static_cast<size_t>(row) * m_cols + col;
-            Sint16 cx = static_cast<Sint16>(m_startX + col * m_cellSize);
-            Sint16 cy = static_cast<Sint16>(m_startY + row * m_cellSize);
-
-            if (hasSafe && m_cspaceSafe[idx]) {
-                // Safe: green
-                filledCircleRGBA(renderer, cx, cy, 2, 0, 255, 0, 255);
-            } else if (hasUnsafe && m_cspaceUnsafe[idx]) {
-                // Collision: red
-                filledCircleRGBA(renderer, cx, cy, 2, 255, 60, 60, 255);
-            }
-            // Uncertain: no marking
-        }
+    if (node->cspaceSafe) {
+        boxRGBA(renderer,       x1, y1, x2, y2,   0, 200,   0, 160);
+        rectangleRGBA(renderer, x1, y1, x2, y2,   0, 255,   0, 200);
+    } else if (node->cspaceUnsafe) {
+        boxRGBA(renderer,       x1, y1, x2, y2, 255,  60,  60, 160);
+        rectangleRGBA(renderer, x1, y1, x2, y2, 255, 100, 100, 200);
+    } else {
+        // Uncertain: faint outline only
+        rectangleRGBA(renderer, x1, y1, x2, y2, 50, 50, 50, 40);
     }
 }
 
-// Returns the max distance from origin to the center of the farthest dynamic inner cell
-float Grid::GetMaxDynamicInnerDistance(Vec2 origin) const
+CSpaceStatus Grid::QueryCSpace(Vec2 t) const
 {
-    float maxDist = 0.0f;
-    for (int row = 0; row < m_rows; ++row) {
-        for (int col = 0; col < m_cols; ++col) {
-            if (!m_dynamicInner[static_cast<size_t>(row) * m_cols + col]) continue;
+    if (!m_cspaceRoot) return CSpaceStatus::Uncertain;
+    return QueryNode(m_cspaceRoot.get(), t);
+}
 
-            // Center of this cell
-            float cx = m_startX + (col + 0.5f) * m_cellSize;
-            float cy = m_startY + (row + 0.5f) * m_cellSize;
-
-            float dx = cx - origin.x;
-            float dy = cy - origin.y;
-            float dist = std::sqrt(dx * dx + dy * dy);
-            if (dist > maxDist) maxDist = dist;
-        }
+// static
+CSpaceStatus Grid::QueryNode(const QTNode* node, Vec2 t)
+{
+    if (!node || !node->bounds.Contains(t)) return CSpaceStatus::Uncertain;
+    if (node->IsLeaf()) {
+        if (node->cspaceSafe)   return CSpaceStatus::Safe;
+        if (node->cspaceUnsafe) return CSpaceStatus::Unsafe;
+        return CSpaceStatus::Uncertain;
     }
-    return maxDist;
+    for (const auto& child : node->children) {
+        if (child && child->bounds.Contains(t))
+            return QueryNode(child.get(), t);
+    }
+    return CSpaceStatus::Uncertain;
 }
 
 // Draw a crosshair at the grid origin
 void Grid::DrawOrigin(SDL_Renderer* renderer) const
 {
-    Sint16 ox = static_cast<Sint16>(m_originX);
-    Sint16 oy = static_cast<Sint16>(m_originY);
-    Sint16 len = static_cast<Sint16>(m_cellSize * 0.4f);
-    thickLineRGBA(renderer, ox - len, oy, ox + len, oy, 2, 255, 255, 0, 255);
-    thickLineRGBA(renderer, ox, oy - len, ox, oy + len, 2, 255, 255, 0, 255);
+    Sint16 ox  = static_cast<Sint16>(m_originX);
+    Sint16 oy  = static_cast<Sint16>(m_originY);
+    Sint16 len = static_cast<Sint16>(m_minCellSize * 0.4f);
+    thickLineRGBA(renderer, ox - len, oy,       ox + len, oy,       2, 255, 255, 0, 255);
+    thickLineRGBA(renderer, ox,       oy - len, ox,       oy + len, 2, 255, 255, 0, 255);
     filledCircleRGBA(renderer, ox, oy, 3, 255, 255, 0, 255);
 }
 
-// --- Rasterization ------------------------------------------------------
-
-void Grid::ResetSpatialIndex()
+float Grid::GetMaxDynamicInnerDistance(Vec2 origin) const
 {
-    m_cellEntries.clear();
+    if (!m_root) return 0.0f;
+    float maxDist = 0.0f;
+    TraverseMaxDist(m_root.get(), origin, maxDist);
+    return maxDist;
+}
 
-    if (m_cols <= 0 || m_rows <= 0 || m_cellSize <= 0.0f) {
-        m_occupancyTree.reset();
+// static
+void Grid::TraverseMaxDist(const QTNode* node, Vec2 origin, float& maxDist)
+{
+    if (!node) return;
+    if (node->IsLeaf()) {
+        if (!node->dynamicInner) return;
+        // Check all four corners of this leaf
+        Vec2 corners[4] = {
+            node->bounds.min,
+            { node->bounds.max.x, node->bounds.min.y },
+            node->bounds.max,
+            { node->bounds.min.x, node->bounds.max.y }
+        };
+        for (const auto& c : corners) {
+            float dx = c.x - origin.x;
+            float dy = c.y - origin.y;
+            float d  = std::sqrt(dx * dx + dy * dy);
+            if (d > maxDist) maxDist = d;
+        }
         return;
     }
-
-    m_occupancyTree = std::make_unique<OccupancyTree>(
-        quadtree::Box<float>(m_startX, m_startY, m_cols * m_cellSize, m_rows * m_cellSize)
-    );
+    for (const auto& child : node->children)
+        TraverseMaxDist(child.get(), origin, maxDist);
 }
 
-Grid::CellEntry& Grid::EnsureCellEntry(int col, int row)
+// --- Quadtree utilities -----------------------------------------------------
+
+// static
+void Grid::Subdivide(QTNode* node)
 {
-    if (m_occupancyTree)
-    {
-        // Query the quadtree with a tiny box at the cell center -- this is the
-        // primary lookup (replaces the former unordered_map index).
-        // The center lies strictly inside exactly one cell, so at most one
-        // entry can match.
-        const float cx  = m_startX + (col + 0.5f) * m_cellSize;
-        const float cy  = m_startY + (row + 0.5f) * m_cellSize;
-        constexpr float kCellQueryEpsilonFactor = 0.005f; // fraction of cellSize
-        const float eps = m_cellSize * kCellQueryEpsilonFactor;
-        auto found = m_occupancyTree->query(
-            quadtree::Box<float>(cx - eps * 0.5f, cy - eps * 0.5f, eps, eps));
-        if (!found.empty())
-            return *found[0];
+    for (int q = 0; q < 4; ++q) {
+        auto child = std::make_unique<QTNode>();
+        child->bounds = ChildBounds(node->bounds, q);
+        // Children inherit the parent's occupancy so that subsequent
+        // rasterizations of other objects remain correct
+        child->staticOccupied  = node->staticOccupied;
+        child->staticInner     = node->staticInner;
+        child->staticGray      = node->staticGray;
+        child->dynamicOccupied = node->dynamicOccupied;
+        child->dynamicInner    = node->dynamicInner;
+        child->dynamicGray     = node->dynamicGray;
+        node->children[q] = std::move(child);
     }
-
-    auto entry = std::make_unique<CellEntry>();
-    entry->col = col;
-    entry->row = row;
-    entry->box = quadtree::Box<float>(
-        m_startX + col * m_cellSize,
-        m_startY + row * m_cellSize,
-        m_cellSize,
-        m_cellSize
-    );
-
-    CellEntry* raw = entry.get();
-    m_cellEntries.push_back(std::move(entry));
-    if (m_occupancyTree)
-        m_occupancyTree->add(raw);
-
-    return *raw;
+    // Clear occupancy on parent (now an internal node)
+    node->staticOccupied  = false;
+    node->staticInner     = false;
+    node->staticGray      = false;
+    node->dynamicOccupied = false;
+    node->dynamicInner    = false;
+    node->dynamicGray     = false;
 }
 
-void Grid::SyncOccupancyArrays()
+// static
+AABB Grid::ChildBounds(const AABB& parent, int q)
 {
-    const size_t totalCells = static_cast<size_t>(m_cols) * static_cast<size_t>(m_rows);
-
-    m_staticOccupied.assign(totalCells, false);
-    m_dynamicOccupied.assign(totalCells, false);
-    m_staticInner.assign(totalCells, false);
-    m_dynamicInner.assign(totalCells, false);
-    m_staticGray.assign(totalCells, false);
-    m_dynamicGray.assign(totalCells, false);
-
-    if (!m_occupancyTree) return;
-
-    // Enumerate all occupied cells via the quadtree (primary spatial representation)
-    const quadtree::Box<float> fullBounds(
-        m_startX, m_startY, m_cols * m_cellSize, m_rows * m_cellSize);
-    const auto entries = m_occupancyTree->query(fullBounds);
-
-    for (const CellEntry* entry : entries) {
-        const size_t idx = CellIndex(entry->col, entry->row, m_cols);
-        m_staticOccupied[idx]  = entry->state.staticOccupied;
-        m_dynamicOccupied[idx] = entry->state.dynamicOccupied;
-        m_staticInner[idx]     = entry->state.staticInner;
-        m_dynamicInner[idx]    = entry->state.dynamicInner;
-        m_staticGray[idx]      = entry->state.staticGray;
-        m_dynamicGray[idx]     = entry->state.dynamicGray;
+    float midX = (parent.min.x + parent.max.x) * 0.5f;
+    float midY = (parent.min.y + parent.max.y) * 0.5f;
+    switch (q) {
+        case 0: return { parent.min,               { midX, midY }          }; // NW
+        case 1: return { { midX, parent.min.y },   { parent.max.x, midY }  }; // NE
+        case 2: return { { parent.min.x, midY },   { midX, parent.max.y }  }; // SW
+        default: return { { midX, midY },           parent.max             }; // SE
     }
 }
 
-// Mark which cells an object occupies
-void Grid::RasterizeObject(const Object& obj)
+// --- Rasterization ----------------------------------------------------------
+
+void Grid::RasterizeObject(QTNode* node, const Object& obj,
+                           const std::vector<Vec2>& worldVerts)
 {
-    const bool isCircle   = (obj.GetShapeType() == ShapeType::Circle);
-    const bool isFreeform = (obj.GetShapeType() == ShapeType::Freeform);
-    const Vec2  center = obj.GetPosition();
-    const float radius = obj.GetRadius();
+    if (!node) return;
 
-    if (isFreeform) {
-        // Freeform polygons: Daum 2012 Gray/flood-fill method
-        auto worldVerts = obj.GetWorldVertices();
-        RasterizePolygonDaum(obj, worldVerts);
-        return;
-    }
+    // Quick rejection: does the object's AABB touch this node at all?
+    if (!node->bounds.Intersects(obj.GetAABB())) return;
 
-    // All other shapes: original per-cell overlap approach
-    AABB box = obj.GetAABB();
-    box.min.x = std::max(box.min.x, 0.0f);
-    box.min.y = std::max(box.min.y, 0.0f);
-    box.max.x = std::min(box.max.x, m_width);
-    box.max.y = std::min(box.max.y, m_height);
+    const bool   isCircle = (obj.GetShapeType() == ShapeType::Circle);
+    const Vec2   center   = obj.GetPosition();
+    const float  radius   = obj.GetRadius();
+    const bool   isDyn    = obj.IsDynamic();
 
-    int colMin = std::max(0, static_cast<int>(std::floor((box.min.x - m_startX) / m_cellSize)));
-    int colMax = std::min(m_cols - 1, static_cast<int>(std::floor((box.max.x - m_startX) / m_cellSize)));
-    int rowMin = std::max(0, static_cast<int>(std::floor((box.min.y - m_startY) / m_cellSize)));
-    int rowMax = std::min(m_rows - 1, static_cast<int>(std::floor((box.max.y - m_startY) / m_cellSize)));
+    float halfW = node->bounds.Width()  * 0.5f;
+    float halfH = node->bounds.Height() * 0.5f;
+    bool canSubdivide = (halfW >= m_minCellSize && halfH >= m_minCellSize);
 
-    std::vector<Vec2> worldVerts;
-    if (!isCircle)
-        worldVerts = obj.GetWorldVertices();
+    if (node->IsLeaf()) {
+        bool hit = isCircle
+            ? CellOverlapsCircle(node->bounds, center, radius)
+            : CellOverlapsPolygon(node->bounds, worldVerts);
+        if (!hit) return;
 
-    for (int row = rowMin; row <= rowMax; ++row) {
-        for (int col = colMin; col <= colMax; ++col) {
-            AABB cell = {
-                { m_startX + col * m_cellSize,       m_startY + row * m_cellSize },
-                { m_startX + (col + 1) * m_cellSize, m_startY + (row + 1) * m_cellSize }
-            };
+        bool inside = isCircle
+            ? CellInsideCircle(node->bounds, center, radius)
+            : CellInsidePolygon(node->bounds, worldVerts);
 
-            bool hit = isCircle
-                ? CellOverlapsCircle(cell, center, radius)
-                : CellOverlapsPolygon(cell, worldVerts);
-
-            if (hit) {
-                CellEntry& entry = EnsureCellEntry(col, row);
-                bool inside = isCircle
-                    ? CellInsideCircle(cell, center, radius)
-                    : CellInsidePolygon(cell, worldVerts);
-
-                if (obj.IsDynamic()) {
-                    entry.state.dynamicOccupied = true;
-                    if (inside) entry.state.dynamicInner = true;
-                } else {
-                    entry.state.staticOccupied = true;
-                    if (inside) entry.state.staticInner = true;
-                }
-            }
+        if (inside) {
+            // Leaf is fully inside the object: mark as inner and stop
+            if (isDyn) { node->dynamicOccupied = true; node->dynamicInner = true; }
+            else        { node->staticOccupied  = true; node->staticInner  = true; }
+            return;
         }
+
+        if (!canSubdivide) {
+            // At minimum cell size: boundary cell
+            if (isDyn) { node->dynamicOccupied = true; node->dynamicGray = true; }
+            else        { node->staticOccupied  = true; node->staticGray  = true; }
+            return;
+        }
+
+        // Partial overlap: subdivide and recurse
+        Subdivide(node);
     }
+
+    // Recurse into children (node is now internal)
+    for (auto& child : node->children)
+        RasterizeObject(child.get(), obj, worldVerts);
 }
 
+// --- Overlap tests ----------------------------------------------------------
 
-void Grid::RasterizePolygonDaum(const Object& obj, const std::vector<Vec2>& worldVerts)
-{
-    const int n = static_cast<int>(worldVerts.size());
-    if (n < 2) return;
-
-    // Bounding region in grid coordinates (clamped to grid)
-    AABB box = obj.GetAABB();
-    int colMin = std::max(0, static_cast<int>(std::floor((box.min.x - m_startX) / m_cellSize)));
-    int colMax = std::min(m_cols - 1, static_cast<int>(std::ceil((box.max.x - m_startX) / m_cellSize)));
-    int rowMin = std::max(0, static_cast<int>(std::floor((box.min.y - m_startY) / m_cellSize)));
-    int rowMax = std::min(m_rows - 1, static_cast<int>(std::ceil((box.max.y - m_startY) / m_cellSize)));
-
-    // Extend bounding region by 1 cell so the flood-fill can enter from all sides
-    int cMin = std::max(0,         colMin - 1);
-    int cMax = std::min(m_cols - 1, colMax + 1);
-    int rMin = std::max(0,         rowMin - 1);
-    int rMax = std::min(m_rows - 1, rowMax + 1);
-
-    int regionW = cMax - cMin + 1;
-    int regionH = rMax - rMin + 1;
-    int regionSize = regionW * regionH;
-
-    // Cell color within the local region
-    // 0 = Unknown, 1 = Gray (boundary), 2 = White (exterior)
-    std::vector<uint8_t> color(regionSize, 0);
-
-    auto localIdx = [&](int col, int row) {
-        return (row - rMin) * regionW + (col - cMin);
-    };
-
-
-    for (int e = 0; e < n; ++e) {
-        const Vec2& A = worldVerts[e];
-        const Vec2& B = worldVerts[(e + 1) % n];
-
-        // AABB of this edge (clamped to search region)
-        int ec0 = std::max(cMin, static_cast<int>(std::floor((std::min(A.x, B.x) - m_startX) / m_cellSize)));
-        int ec1 = std::min(cMax, static_cast<int>(std::ceil ((std::max(A.x, B.x) - m_startX) / m_cellSize)));
-        int er0 = std::max(rMin, static_cast<int>(std::floor((std::min(A.y, B.y) - m_startY) / m_cellSize)));
-        int er1 = std::min(rMax, static_cast<int>(std::ceil ((std::max(A.y, B.y) - m_startY) / m_cellSize)));
-
-        for (int row = er0; row <= er1; ++row) {
-            for (int col = ec0; col <= ec1; ++col) {
-                AABB cell = {
-                    { m_startX + col * m_cellSize,       m_startY + row * m_cellSize },
-                    { m_startX + (col + 1) * m_cellSize, m_startY + (row + 1) * m_cellSize }
-                };
-                if (SegmentIntersectsAABB(A, B, cell)) {
-                    color[localIdx(col, row)] = 1; // Gray
-                }
-            }
-        }
-    }
-
-    // Seed all border cells that are not Gray
-    std::vector<std::pair<int,int>> queue;
-    queue.reserve(2 * (regionW + regionH));
-
-    auto tryEnqueue = [&](int col, int row) {
-        int li = localIdx(col, row);
-        if (color[li] == 0) {
-            color[li] = 2; // White
-            queue.push_back({col, row});
-        }
-    };
-
-    for (int col = cMin; col <= cMax; ++col) {
-        tryEnqueue(col, rMin);
-        tryEnqueue(col, rMax);
-    }
-    for (int row = rMin + 1; row < rMax; ++row) {
-        tryEnqueue(cMin, row);
-        tryEnqueue(cMax, row);
-    }
-
-    // 4-connected BFS
-    const int dc[] = { 1, -1, 0,  0 };
-    const int dr[] = { 0,  0, 1, -1 };
-
-    for (size_t qi = 0; qi < queue.size(); ++qi) {
-        auto [col, row] = queue[qi];
-        for (int d = 0; d < 4; ++d) {
-            int nc = col + dc[d];
-            int nr = row + dr[d];
-            if (nc < cMin || nc > cMax || nr < rMin || nr > rMax) continue;
-            int li = localIdx(nc, nr);
-            if (color[li] == 0) {
-                color[li] = 2; // White
-                queue.push_back({nc, nr});
-            }
-        }
-    }
-
-
-    for (int row = rMin; row <= rMax; ++row) {
-        for (int col = cMin; col <= cMax; ++col) {
-            uint8_t c = color[localIdx(col, row)];
-            if (c == 2) continue; // exterior: nothing to mark
-
-            CellEntry& entry = EnsureCellEntry(col, row);
-            if (obj.IsDynamic()) {
-                entry.state.dynamicOccupied = true;
-                if (c == 0) entry.state.dynamicInner = true;
-                if (c == 1) entry.state.dynamicGray = true;
-            } else {
-                entry.state.staticOccupied = true;
-                if (c == 0) entry.state.staticInner = true;
-                if (c == 1) entry.state.staticGray = true;
-            }
-        }
-    }
-}
-
-// --- Overlap tests ------------------------------------------------------
-
-// Circle vs AABB overlap (closest-point check)
 bool Grid::CellOverlapsCircle(const AABB& cell, Vec2 center, float radius)
 {
     float cx = std::clamp(center.x, cell.min.x, cell.max.x);
@@ -594,20 +462,17 @@ bool Grid::CellOverlapsCircle(const AABB& cell, Vec2 center, float radius)
     return (dx * dx + dy * dy) <= (radius * radius);
 }
 
-// Polygon vs AABB overlap
 bool Grid::CellOverlapsPolygon(const AABB& cell, const std::vector<Vec2>& verts)
 {
     int n = static_cast<int>(verts.size());
     if (n < 3) return false;
 
-    // Vertex inside cell?
     for (const auto& v : verts) {
         if (v.x >= cell.min.x && v.x <= cell.max.x &&
             v.y >= cell.min.y && v.y <= cell.max.y)
             return true;
     }
 
-    // Cell corner inside polygon?
     Vec2 corners[4] = {
         cell.min,
         { cell.max.x, cell.min.y },
@@ -619,7 +484,6 @@ bool Grid::CellOverlapsPolygon(const AABB& cell, const std::vector<Vec2>& verts)
             return true;
     }
 
-    // Edge-edge intersection?
     for (int i = 0; i < n; ++i) {
         const Vec2& a = verts[i];
         const Vec2& b = verts[(i + 1) % n];
@@ -630,13 +494,12 @@ bool Grid::CellOverlapsPolygon(const AABB& cell, const std::vector<Vec2>& verts)
     return false;
 }
 
-// Segment vs AABB intersection (Liang-Barsky)
 bool Grid::SegmentIntersectsAABB(Vec2 a, Vec2 b, const AABB& box)
 {
     float dx = b.x - a.x;
     float dy = b.y - a.y;
 
-    float p[4] = { -dx,  dx, -dy,  dy };
+    float p[4] = { -dx, dx, -dy, dy };
     float q[4] = { a.x - box.min.x, box.max.x - a.x,
                    a.y - box.min.y, box.max.y - a.y };
 
@@ -657,7 +520,6 @@ bool Grid::SegmentIntersectsAABB(Vec2 a, Vec2 b, const AABB& box)
     return true;
 }
 
-// True if all 4 cell corners are inside the circle
 bool Grid::CellInsideCircle(const AABB& cell, Vec2 center, float radius)
 {
     float r2 = radius * radius;
@@ -676,7 +538,6 @@ bool Grid::CellInsideCircle(const AABB& cell, Vec2 center, float radius)
     return true;
 }
 
-// True if all 4 cell corners are inside the polygon
 bool Grid::CellInsidePolygon(const AABB& cell, const std::vector<Vec2>& verts)
 {
     Vec2 corners[4] = {
@@ -692,7 +553,6 @@ bool Grid::CellInsidePolygon(const AABB& cell, const std::vector<Vec2>& verts)
     return true;
 }
 
-// Point-in-polygon (ray casting)
 bool Grid::PointInPolygon(Vec2 p, const std::vector<Vec2>& verts)
 {
     int n = static_cast<int>(verts.size());
