@@ -350,7 +350,7 @@ void Grid::RasterizeObject(OccTree::Node* node, const Object& obj,
         // Partial overlap: subdivide, children inherit current occupancy state,
         // then clear parent (it becomes an internal node)
         OccTree::Subdivide(node,
-            [](OccTree::Node* parent, OccTree::Node* child, int /*q*/) {
+            [](OccTree::Node* parent, OccTree::Node* child, int) {
                 child->data = parent->data;
             });
         node->data = {};
