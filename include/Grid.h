@@ -8,7 +8,6 @@
 #include <vector>
 #include <cstdint>
 #include <memory>
-#include <unordered_map>
 
 class Object;
 
@@ -120,7 +119,6 @@ private:
     Vec2 m_refScreenPos = {};            // screen pos of the C-Space reference point
 
     std::vector<std::unique_ptr<CellEntry>> m_cellEntries;
-    std::unordered_map<size_t, CellEntry*> m_cellLookup;
     std::unique_ptr<OccupancyTree> m_occupancyTree;
 
     // Rasterize a single object onto the grid (marks which cells it covers)

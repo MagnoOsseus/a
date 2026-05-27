@@ -71,7 +71,6 @@ void Grid::Build(float screenW, float screenH, float cellSize, const std::vector
 void Grid::Clear()
 {
     m_cellEntries.clear();
-    m_cellLookup.clear();
     m_occupancyTree.reset();
     m_staticOccupied.clear();
     m_dynamicOccupied.clear();
@@ -333,7 +332,6 @@ void Grid::DrawOrigin(SDL_Renderer* renderer) const
 void Grid::ResetSpatialIndex()
 {
     m_cellEntries.clear();
-    m_cellLookup.clear();
 
     if (m_cols <= 0 || m_rows <= 0 || m_cellSize <= 0.0f) {
         m_occupancyTree.reset();
@@ -347,10 +345,21 @@ void Grid::ResetSpatialIndex()
 
 Grid::CellEntry& Grid::EnsureCellEntry(int col, int row)
 {
-    const std::size_t idx = CellIndex(col, row, m_cols);
-    auto it = m_cellLookup.find(idx);
-    if (it != m_cellLookup.end())
-        return *it->second;
+    if (m_occupancyTree)
+    {
+        // Query the quadtree with a tiny box at the cell center -- this is the
+        // primary lookup (replaces the former unordered_map index).
+        // The center lies strictly inside exactly one cell, so at most one
+        // entry can match.
+        const float cx  = m_startX + (col + 0.5f) * m_cellSize;
+        const float cy  = m_startY + (row + 0.5f) * m_cellSize;
+        constexpr float kCellQueryEpsilonFactor = 0.005f; // fraction of cellSize
+        const float eps = m_cellSize * kCellQueryEpsilonFactor;
+        auto found = m_occupancyTree->query(
+            quadtree::Box<float>(cx - eps * 0.5f, cy - eps * 0.5f, eps, eps));
+        if (!found.empty())
+            return *found[0];
+    }
 
     auto entry = std::make_unique<CellEntry>();
     entry->col = col;
@@ -364,7 +373,6 @@ Grid::CellEntry& Grid::EnsureCellEntry(int col, int row)
 
     CellEntry* raw = entry.get();
     m_cellEntries.push_back(std::move(entry));
-    m_cellLookup.emplace(idx, raw);
     if (m_occupancyTree)
         m_occupancyTree->add(raw);
 
@@ -382,14 +390,21 @@ void Grid::SyncOccupancyArrays()
     m_staticGray.assign(totalCells, false);
     m_dynamicGray.assign(totalCells, false);
 
-    for (const auto& entry : m_cellEntries) {
+    if (!m_occupancyTree) return;
+
+    // Enumerate all occupied cells via the quadtree (primary spatial representation)
+    const quadtree::Box<float> fullBounds(
+        m_startX, m_startY, m_cols * m_cellSize, m_rows * m_cellSize);
+    const auto entries = m_occupancyTree->query(fullBounds);
+
+    for (const CellEntry* entry : entries) {
         const size_t idx = CellIndex(entry->col, entry->row, m_cols);
-        m_staticOccupied[idx] = entry->state.staticOccupied;
+        m_staticOccupied[idx]  = entry->state.staticOccupied;
         m_dynamicOccupied[idx] = entry->state.dynamicOccupied;
-        m_staticInner[idx] = entry->state.staticInner;
-        m_dynamicInner[idx] = entry->state.dynamicInner;
-        m_staticGray[idx] = entry->state.staticGray;
-        m_dynamicGray[idx] = entry->state.dynamicGray;
+        m_staticInner[idx]     = entry->state.staticInner;
+        m_dynamicInner[idx]    = entry->state.dynamicInner;
+        m_staticGray[idx]      = entry->state.staticGray;
+        m_dynamicGray[idx]     = entry->state.dynamicGray;
     }
 }
 
