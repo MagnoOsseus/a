@@ -194,14 +194,14 @@ void App::Update()
         float panelH = static_cast<float>(m_windowH) - m_toolbarH;
 
         // Get or create the grid for the current angle
+        float effCellSize = m_cellSize / std::pow(2.0f, static_cast<float>(m_refinementLevels));
         Grid& currentGrid = m_layers[m_currentAngle];
-        currentGrid.Build(panelW, panelH, m_cellSize, m_objects, m_gridOrigin, static_cast<float>(m_currentAngle));
+        currentGrid.Build(panelW, panelH, effCellSize, m_objects, m_gridOrigin, static_cast<float>(m_currentAngle));
 
-        // Recompute angular step using the smallest cell size (refined)
+        // Recompute angular step using the smallest cell size
         float d = currentGrid.GetMaxDynamicInnerDistance(m_gridOrigin);
         if (d > 0.0f) {
-            float smallestCell = m_cellSize / std::pow(2.0f, static_cast<float>(m_refinementLevels));
-            float stepRad = smallestCell / (2.0f * d);
+            float stepRad = currentGrid.GetCellSize() / (2.0f * d);
             m_angleDeg = stepRad * (180.0f / static_cast<float>(std::numbers::pi));
         }
 
@@ -221,14 +221,11 @@ void App::Update()
             // Compute C-Space for every angle
             for (int angle : m_angleSteps) {
                 Grid& g = m_layers[angle];
-                g.Build(panelW, panelH, m_cellSize, m_objects, m_gridOrigin, static_cast<float>(angle));
+                g.Build(panelW, panelH, effCellSize, m_objects, m_gridOrigin, static_cast<float>(angle));
                 g.ComputeCSpace();
 
                 CSpaceRefiner& refiner = m_layerRefiners[angle];
-                if (m_refinementLevels > 0)
-                    refiner.Refine(g, m_objects, m_refinementLevels, static_cast<float>(angle));
-                else
-                    refiner.Clear();
+                refiner.Clear();
             }
 
             // Set current angle to first step
@@ -365,7 +362,7 @@ void App::Render()
     auto gridIt = m_layers.find(m_currentAngle);
     auto refinerIt = m_layerRefiners.find(m_currentAngle);
 
-    if (gridIt != m_layers.end() && !gridIt->second.GetCSpaceSafe().empty()) {
+    if (gridIt != m_layers.end() && gridIt->second.HasCSpace()) {
         const Grid& currentGrid = gridIt->second;
         const CSpaceRefiner& currentRefiner = (refinerIt != m_layerRefiners.end()) 
             ? refinerIt->second 
