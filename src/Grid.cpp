@@ -44,7 +44,7 @@ void Grid::Build(float screenW, float screenH, float minCellSize,
     m_root = std::make_unique<QTNode>();
     m_root->bounds = {
         { m_startX, m_startY },
-        { m_startX + (screenW - m_startX), m_startY + (screenH - m_startY) }
+        { screenW,  screenH  }
     };
 
     // Rasterize every object into the quadtree
@@ -392,10 +392,10 @@ AABB Grid::ChildBounds(const AABB& parent, int q)
     float midX = (parent.min.x + parent.max.x) * 0.5f;
     float midY = (parent.min.y + parent.max.y) * 0.5f;
     switch (q) {
-        case 0: return { parent.min,                  { midX, midY } };       // NW
-        case 1: return { { midX, parent.min.y },      { parent.max.x, midY } }; // NE
-        case 2: return { { parent.min.x, midY },      { midX, parent.max.y } }; // SW
-        default: return { { midX, midY },             parent.max };           // SE
+        case 0: return { parent.min,               { midX, midY }          }; // NW
+        case 1: return { { midX, parent.min.y },   { parent.max.x, midY }  }; // NE
+        case 2: return { { parent.min.x, midY },   { midX, parent.max.y }  }; // SW
+        default: return { { midX, midY },           parent.max             }; // SE
     }
 }
 
