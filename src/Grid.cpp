@@ -154,8 +154,6 @@ void Grid::ComputeCSpace()
     m_refScreenPos = { refX, refY };
 
     // Precompute Minkowski obstacle AABBs.
-    // For a translation t, dynamic leaf d shifted by (t - refPos) overlaps static leaf s
-    // iff  t  ∈  [ s.min − d.max + refPos,  s.max − d.min + refPos ]
     std::vector<AABB> minkConservative; // dynOcc × statOcc
     minkConservative.reserve(dynOcc.size() * statOcc.size());
     for (const auto& d : dynOcc) {

@@ -12,14 +12,7 @@ class Object;
 // Result of a C-Space point query
 enum class CSpaceStatus { Safe, Unsafe, Uncertain };
 
-// Pure quadtree decomposition of the screen.
-// Space is subdivided adaptively: only regions near obstacle boundaries
-// are refined down to minCellSize; empty / fully-interior regions keep
-// their larger parent cell.  No flat grid arrays are used.
-//
-// Tree infrastructure (node allocation, subdivision, child-bounds, traversal,
-// point queries) is delegated to AdaptiveQuadTree<T>.  All geometry and
-// classification logic remains in this class.
+
 class Grid : public IDrawable
 {
 public:
@@ -31,7 +24,7 @@ public:
                const std::vector<Object>& objects, Vec2 origin,
                float angleDegrees = 0.0f);
 
-    // Compute configuration space (call separately after Build).
+    // Compute configuration space 
     void ComputeCSpace();
 
     // Reset everything.
@@ -69,10 +62,7 @@ public:
     static bool CellInsidePolygon(const AABB& cell, const std::vector<Vec2>& verts);
 
 private:
-    // -----------------------------------------------------------------------
-    // Data stored in occupancy-tree leaves (set by RasterizeObject).
-    // Internal nodes carry default-constructed OccupancyData (all false).
-    // -----------------------------------------------------------------------
+
     struct OccupancyData
     {
         bool staticOccupied  = false;
@@ -83,10 +73,6 @@ private:
         bool dynamicGray     = false;
     };
 
-    // -----------------------------------------------------------------------
-    // Data stored in C-Space tree leaves (set by BuildCSpaceNode).
-    // Neither flag set ↔ Uncertain.
-    // -----------------------------------------------------------------------
     struct CSpaceData
     {
         bool safe   = false;
@@ -96,9 +82,9 @@ private:
     using OccTree = AdaptiveQuadTree<OccupancyData>;
     using CSTree  = AdaptiveQuadTree<CSpaceData>;
 
-    // Occupancy quadtree (built by Build / RasterizeObject)
+    // Occupancy quadtree 
     OccTree m_occupancyTree;
-    // C-Space quadtree (built by ComputeCSpace)
+    // C-Space quadtree 
     CSTree  m_cspaceTree;
     bool    m_hasCSpace   = false;
 
@@ -111,15 +97,11 @@ private:
     float m_originY     = 0.0f;
     Vec2  m_refScreenPos = {};    // C-Space reference point (centroid of dynamic object)
 
-    // --- Rasterization -----------------------------------------------------
-    // Recursively mark the occupancy tree to reflect one object's footprint.
+
     void RasterizeObject(OccTree::Node* node, const Object& obj,
                          const std::vector<Vec2>& worldVerts);
 
-    // --- C-Space computation -----------------------------------------------
-    // Recursively classify C-Space tree nodes using precomputed Minkowski
-    // obstacles (minkConservative = conservative-overlap obstacles,
-    //            minkDefinite    = definite-collision obstacles).
+
     void BuildCSpaceNode(CSTree::Node* node,
                          const std::vector<AABB>& minkConservative,
                          const std::vector<AABB>& minkDefinite);
