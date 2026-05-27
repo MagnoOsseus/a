@@ -5,6 +5,14 @@
 #include <cmath>
 #include <algorithm>
 
+namespace
+{
+constexpr std::size_t CellIndex(int col, int row, int cols)
+{
+    return static_cast<std::size_t>(row) * static_cast<std::size_t>(cols) + static_cast<std::size_t>(col);
+}
+}
+
 // --- Public -------------------------------------------------------------
 
 // Rebuild the grid and rasterize all objects onto it
@@ -37,7 +45,7 @@ void Grid::Build(float screenW, float screenH, float cellSize, const std::vector
     m_cols = newCols;
     m_rows = newRows;
 
-    const size_t totalCells = static_cast<size_t>(m_cols) * m_rows;
+    const size_t totalCells = static_cast<size_t>(m_cols) * static_cast<size_t>(m_rows);
 
     m_staticOccupied.assign(totalCells, false);
     m_dynamicOccupied.assign(totalCells, false);
@@ -45,6 +53,7 @@ void Grid::Build(float screenW, float screenH, float cellSize, const std::vector
     m_dynamicInner.assign(totalCells, false);
     m_staticGray.assign(totalCells, false);
     m_dynamicGray.assign(totalCells, false);
+    ResetSpatialIndex();
 
     // Mark which cells each object covers (rotate dynamic objects first)
     for (const auto& obj : objects) {
@@ -55,10 +64,15 @@ void Grid::Build(float screenW, float screenH, float cellSize, const std::vector
             RasterizeObject(obj);
         }
     }
+
+    SyncOccupancyArrays();
 }
 
 void Grid::Clear()
 {
+    m_cellEntries.clear();
+    m_cellLookup.clear();
+    m_occupancyTree.reset();
     m_staticOccupied.clear();
     m_dynamicOccupied.clear();
     m_staticInner.clear();
@@ -316,6 +330,69 @@ void Grid::DrawOrigin(SDL_Renderer* renderer) const
 
 // --- Rasterization ------------------------------------------------------
 
+void Grid::ResetSpatialIndex()
+{
+    m_cellEntries.clear();
+    m_cellLookup.clear();
+
+    if (m_cols <= 0 || m_rows <= 0 || m_cellSize <= 0.0f) {
+        m_occupancyTree.reset();
+        return;
+    }
+
+    m_occupancyTree = std::make_unique<OccupancyTree>(
+        quadtree::Box<float>(m_startX, m_startY, m_cols * m_cellSize, m_rows * m_cellSize)
+    );
+}
+
+Grid::CellEntry& Grid::EnsureCellEntry(int col, int row)
+{
+    const std::size_t idx = CellIndex(col, row, m_cols);
+    auto it = m_cellLookup.find(idx);
+    if (it != m_cellLookup.end())
+        return *it->second;
+
+    auto entry = std::make_unique<CellEntry>();
+    entry->col = col;
+    entry->row = row;
+    entry->box = quadtree::Box<float>(
+        m_startX + col * m_cellSize,
+        m_startY + row * m_cellSize,
+        m_cellSize,
+        m_cellSize
+    );
+
+    CellEntry* raw = entry.get();
+    m_cellEntries.push_back(std::move(entry));
+    m_cellLookup.emplace(idx, raw);
+    if (m_occupancyTree)
+        m_occupancyTree->add(raw);
+
+    return *raw;
+}
+
+void Grid::SyncOccupancyArrays()
+{
+    const size_t totalCells = static_cast<size_t>(m_cols) * static_cast<size_t>(m_rows);
+
+    m_staticOccupied.assign(totalCells, false);
+    m_dynamicOccupied.assign(totalCells, false);
+    m_staticInner.assign(totalCells, false);
+    m_dynamicInner.assign(totalCells, false);
+    m_staticGray.assign(totalCells, false);
+    m_dynamicGray.assign(totalCells, false);
+
+    for (const auto& entry : m_cellEntries) {
+        const size_t idx = CellIndex(entry->col, entry->row, m_cols);
+        m_staticOccupied[idx] = entry->state.staticOccupied;
+        m_dynamicOccupied[idx] = entry->state.dynamicOccupied;
+        m_staticInner[idx] = entry->state.staticInner;
+        m_dynamicInner[idx] = entry->state.dynamicInner;
+        m_staticGray[idx] = entry->state.staticGray;
+        m_dynamicGray[idx] = entry->state.dynamicGray;
+    }
+}
+
 // Mark which cells an object occupies
 void Grid::RasterizeObject(const Object& obj)
 {
@@ -359,17 +436,17 @@ void Grid::RasterizeObject(const Object& obj)
                 : CellOverlapsPolygon(cell, worldVerts);
 
             if (hit) {
-                size_t idx = static_cast<size_t>(row) * m_cols + col;
+                CellEntry& entry = EnsureCellEntry(col, row);
                 bool inside = isCircle
                     ? CellInsideCircle(cell, center, radius)
                     : CellInsidePolygon(cell, worldVerts);
 
                 if (obj.IsDynamic()) {
-                    m_dynamicOccupied[idx] = true;
-                    if (inside) m_dynamicInner[idx] = true;
+                    entry.state.dynamicOccupied = true;
+                    if (inside) entry.state.dynamicInner = true;
                 } else {
-                    m_staticOccupied[idx] = true;
-                    if (inside) m_staticInner[idx] = true;
+                    entry.state.staticOccupied = true;
+                    if (inside) entry.state.staticInner = true;
                 }
             }
         }
@@ -476,15 +553,15 @@ void Grid::RasterizePolygonDaum(const Object& obj, const std::vector<Vec2>& worl
             uint8_t c = color[localIdx(col, row)];
             if (c == 2) continue; // exterior: nothing to mark
 
-            size_t idx = static_cast<size_t>(row) * m_cols + col;
+            CellEntry& entry = EnsureCellEntry(col, row);
             if (obj.IsDynamic()) {
-                m_dynamicOccupied[idx] = true;
-                if (c == 0) m_dynamicInner[idx] = true;
-                if (c == 1) m_dynamicGray[idx]  = true;
+                entry.state.dynamicOccupied = true;
+                if (c == 0) entry.state.dynamicInner = true;
+                if (c == 1) entry.state.dynamicGray = true;
             } else {
-                m_staticOccupied[idx] = true;
-                if (c == 0) m_staticInner[idx] = true;
-                if (c == 1) m_staticGray[idx]  = true;
+                entry.state.staticOccupied = true;
+                if (c == 0) entry.state.staticInner = true;
+                if (c == 1) entry.state.staticGray = true;
             }
         }
     }
