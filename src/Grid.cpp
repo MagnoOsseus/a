@@ -373,7 +373,7 @@ Grid::CellEntry& Grid::EnsureCellEntry(int col, int row)
 
 void Grid::SyncOccupancyArrays()
 {
-    const size_t totalCells = static_cast<size_t>(m_cols) * m_rows;
+    const size_t totalCells = static_cast<size_t>(m_cols) * static_cast<size_t>(m_rows);
 
     m_staticOccupied.assign(totalCells, false);
     m_dynamicOccupied.assign(totalCells, false);
