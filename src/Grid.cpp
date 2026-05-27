@@ -30,7 +30,7 @@ void Grid::Build(float screenW, float screenH, float minCellSize,
     m_originX     = origin.x;
     m_originY     = origin.y;
     m_hasCSpace   = false;
-    m_cspaceRoot.reset();
+    m_cspaceTree.Reset();
 
     // Snap root to the grid aligned with the origin (same logic as before)
     float rx = std::fmod(origin.x, minCellSize);
@@ -40,12 +40,8 @@ void Grid::Build(float screenW, float screenH, float minCellSize,
     m_startX = rx - minCellSize;
     m_startY = ry - minCellSize;
 
-    // Create root node covering the screen area
-    m_root = std::make_unique<QTNode>();
-    m_root->bounds = {
-        { m_startX, m_startY },
-        { screenW,  screenH  }
-    };
+    // Initialise root node covering the screen area
+    m_occupancyTree.Init({ { m_startX, m_startY }, { screenW, screenH } });
 
     // Rasterize every object into the quadtree
     for (const auto& obj : objects) {
@@ -54,19 +50,19 @@ void Grid::Build(float screenW, float screenH, float minCellSize,
             Object rotated = obj.GetRotated(angleDegrees);
             if (rotated.GetShapeType() != ShapeType::Circle)
                 worldVerts = rotated.GetWorldVertices();
-            RasterizeObject(m_root.get(), rotated, worldVerts);
+            RasterizeObject(m_occupancyTree.GetRoot(), rotated, worldVerts);
         } else {
             if (obj.GetShapeType() != ShapeType::Circle)
                 worldVerts = obj.GetWorldVertices();
-            RasterizeObject(m_root.get(), obj, worldVerts);
+            RasterizeObject(m_occupancyTree.GetRoot(), obj, worldVerts);
         }
     }
 }
 
 void Grid::Clear()
 {
-    m_root.reset();
-    m_cspaceRoot.reset();
+    m_occupancyTree.Reset();
+    m_cspaceTree.Reset();
     m_hasCSpace = false;
 }
 
@@ -74,68 +70,69 @@ void Grid::Clear()
 
 void Grid::Draw(SDL_Renderer* renderer) const
 {
-    if (!m_root) return;
-    TraverseDraw(m_root.get(), renderer);
-}
+    if (!m_occupancyTree.HasRoot()) return;
 
-// static
-void Grid::TraverseDraw(const QTNode* node, SDL_Renderer* renderer)
-{
-    if (!node) return;
+    OccTree::ForEachLeaf(m_occupancyTree.GetRoot(),
+        [renderer](const OccTree::Node* node)
+        {
+            const OccupancyData& d = node->data;
+            bool sOcc = d.staticOccupied;
+            bool dOcc = d.dynamicOccupied;
+            if (!sOcc && !dOcc) return; // empty leaf – no drawing
 
-    if (!node->IsLeaf()) {
-        for (const auto& child : node->children)
-            TraverseDraw(child.get(), renderer);
-        return;
-    }
+            bool sGray = d.staticGray;
+            bool dGray = d.dynamicGray;
 
-    bool sOcc = node->staticOccupied;
-    bool dOcc = node->dynamicOccupied;
-    if (!sOcc && !dOcc) return; // empty leaf – no drawing
+            Sint16 x1 = static_cast<Sint16>(node->bounds.min.x);
+            Sint16 y1 = static_cast<Sint16>(node->bounds.min.y);
+            Sint16 x2 = static_cast<Sint16>(node->bounds.max.x);
+            Sint16 y2 = static_cast<Sint16>(node->bounds.max.y);
 
-    bool sGray = node->staticGray;
-    bool dGray = node->dynamicGray;
-
-    Sint16 x1 = static_cast<Sint16>(node->bounds.min.x);
-    Sint16 y1 = static_cast<Sint16>(node->bounds.min.y);
-    Sint16 x2 = static_cast<Sint16>(node->bounds.max.x);
-    Sint16 y2 = static_cast<Sint16>(node->bounds.max.y);
-
-    if (sOcc && dOcc) {
-        if (sGray || dGray) {
-            boxRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 80);
-            rectangleRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 220);
-        } else {
-            boxRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 120);
-            rectangleRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 220);
-        }
-    } else if (sOcc) {
-        if (sGray) {
-            boxRGBA(renderer, x1, y1, x2, y2, 255, 255, 255, 30);
-            rectangleRGBA(renderer, x1, y1, x2, y2, 0, 200, 0, 200);
-        } else {
-            boxRGBA(renderer, x1, y1, x2, y2, 0, 255, 0, 60);
-            rectangleRGBA(renderer, x1, y1, x2, y2, 0, 255, 0, 120);
-        }
-    } else { // dOcc
-        if (dGray) {
-            boxRGBA(renderer, x1, y1, x2, y2, 255, 255, 255, 30);
-            rectangleRGBA(renderer, x1, y1, x2, y2, 0, 200, 200, 200);
-        } else {
-            boxRGBA(renderer, x1, y1, x2, y2, 0, 255, 255, 60);
-            rectangleRGBA(renderer, x1, y1, x2, y2, 0, 255, 255, 120);
-        }
-    }
+            if (sOcc && dOcc) {
+                if (sGray || dGray) {
+                    boxRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 80);
+                    rectangleRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 220);
+                } else {
+                    boxRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 120);
+                    rectangleRGBA(renderer, x1, y1, x2, y2, 255, 140, 0, 220);
+                }
+            } else if (sOcc) {
+                if (sGray) {
+                    boxRGBA(renderer, x1, y1, x2, y2, 255, 255, 255, 30);
+                    rectangleRGBA(renderer, x1, y1, x2, y2, 0, 200, 0, 200);
+                } else {
+                    boxRGBA(renderer, x1, y1, x2, y2, 0, 255, 0, 60);
+                    rectangleRGBA(renderer, x1, y1, x2, y2, 0, 255, 0, 120);
+                }
+            } else { // dOcc
+                if (dGray) {
+                    boxRGBA(renderer, x1, y1, x2, y2, 255, 255, 255, 30);
+                    rectangleRGBA(renderer, x1, y1, x2, y2, 0, 200, 200, 200);
+                } else {
+                    boxRGBA(renderer, x1, y1, x2, y2, 0, 255, 255, 60);
+                    rectangleRGBA(renderer, x1, y1, x2, y2, 0, 255, 255, 120);
+                }
+            }
+        });
 }
 
 // --- Configuration Space ----------------------------------------------------
 
 void Grid::ComputeCSpace()
 {
-    if (!m_root) return;
+    if (!m_occupancyTree.HasRoot()) return;
 
+    // Collect occupied/inner leaf AABBs from the occupancy tree
     std::vector<AABB> dynOcc, dynInn, statOcc, statInn;
-    CollectLeaves(m_root.get(), dynOcc, dynInn, statOcc, statInn);
+    OccTree::ForEachLeaf(m_occupancyTree.GetRoot(),
+        [&](const OccTree::Node* leaf)
+        {
+            const OccupancyData& d = leaf->data;
+            if (d.dynamicOccupied) dynOcc.push_back(leaf->bounds);
+            if (d.dynamicInner)    dynInn.push_back(leaf->bounds);
+            if (d.staticOccupied)  statOcc.push_back(leaf->bounds);
+            if (d.staticInner)     statInn.push_back(leaf->bounds);
+        });
 
     if (dynOcc.empty()) return;
 
@@ -186,40 +183,20 @@ void Grid::ComputeCSpace()
         }
     }
 
-    // Build CSpace tree
-    m_cspaceRoot = std::make_unique<QTNode>();
-    m_cspaceRoot->bounds = m_root->bounds;
+    // Build CSpace tree with the same root bounds as the occupancy tree
+    m_cspaceTree.Init(m_occupancyTree.GetRoot()->bounds);
 
     if (statOcc.empty()) {
         // No obstacles: the entire C-Space is safe
-        m_cspaceRoot->cspaceSafe = true;
+        m_cspaceTree.GetRoot()->data.safe = true;
     } else {
-        BuildCSpaceNode(m_cspaceRoot.get(), minkConservative, minkDefinite);
+        BuildCSpaceNode(m_cspaceTree.GetRoot(), minkConservative, minkDefinite);
     }
 
     m_hasCSpace = true;
 }
 
-// static
-void Grid::CollectLeaves(const QTNode* node,
-                         std::vector<AABB>& dynOcc,
-                         std::vector<AABB>& dynInn,
-                         std::vector<AABB>& statOcc,
-                         std::vector<AABB>& statInn)
-{
-    if (!node) return;
-    if (node->IsLeaf()) {
-        if (node->dynamicOccupied) dynOcc.push_back(node->bounds);
-        if (node->dynamicInner)    dynInn.push_back(node->bounds);
-        if (node->staticOccupied)  statOcc.push_back(node->bounds);
-        if (node->staticInner)     statInn.push_back(node->bounds);
-        return;
-    }
-    for (const auto& child : node->children)
-        CollectLeaves(child.get(), dynOcc, dynInn, statOcc, statInn);
-}
-
-void Grid::BuildCSpaceNode(QTNode* node,
+void Grid::BuildCSpaceNode(CSTree::Node* node,
                            const std::vector<AABB>& minkConservative,
                            const std::vector<AABB>& minkDefinite)
 {
@@ -231,14 +208,14 @@ void Grid::BuildCSpaceNode(QTNode* node,
         if (b.Intersects(mk)) { anyIntersect = true; break; }
     }
     if (!anyIntersect) {
-        node->cspaceSafe = true;
+        node->data.safe = true;
         return;
     }
 
     // Is this node entirely inside a definite obstacle?
     for (const auto& mk : minkDefinite) {
         if (ContainsAABB(mk, b)) {
-            node->cspaceUnsafe = true;
+            node->data.unsafe = true;
             return;
         }
     }
@@ -247,12 +224,9 @@ void Grid::BuildCSpaceNode(QTNode* node,
     float halfW = b.Width()  * 0.5f;
     float halfH = b.Height() * 0.5f;
     if (halfW >= m_minCellSize && halfH >= m_minCellSize) {
-        for (int q = 0; q < 4; ++q) {
-            node->children[q] = std::make_unique<QTNode>();
-            node->children[q]->bounds = ChildBounds(b, q);
-        }
-        for (int q = 0; q < 4; ++q)
-            BuildCSpaceNode(node->children[q].get(), minkConservative, minkDefinite);
+        CSTree::Subdivide(node); // children start uncertain (default CSpaceData)
+        for (auto& child : node->children)
+            BuildCSpaceNode(child.get(), minkConservative, minkDefinite);
         return;
     }
 
@@ -261,57 +235,36 @@ void Grid::BuildCSpaceNode(QTNode* node,
 
 void Grid::DrawCSpace(SDL_Renderer* renderer) const
 {
-    if (!m_cspaceRoot) return;
-    TraverseDrawCSpace(m_cspaceRoot.get(), renderer);
-}
+    if (!m_cspaceTree.HasRoot()) return;
 
-// static
-void Grid::TraverseDrawCSpace(const QTNode* node, SDL_Renderer* renderer)
-{
-    if (!node) return;
+    CSTree::ForEachLeaf(m_cspaceTree.GetRoot(),
+        [renderer](const CSTree::Node* node)
+        {
+            Sint16 x1 = static_cast<Sint16>(node->bounds.min.x);
+            Sint16 y1 = static_cast<Sint16>(node->bounds.min.y);
+            Sint16 x2 = static_cast<Sint16>(node->bounds.max.x);
+            Sint16 y2 = static_cast<Sint16>(node->bounds.max.y);
 
-    if (!node->IsLeaf()) {
-        for (const auto& child : node->children)
-            TraverseDrawCSpace(child.get(), renderer);
-        return;
-    }
-
-    Sint16 x1 = static_cast<Sint16>(node->bounds.min.x);
-    Sint16 y1 = static_cast<Sint16>(node->bounds.min.y);
-    Sint16 x2 = static_cast<Sint16>(node->bounds.max.x);
-    Sint16 y2 = static_cast<Sint16>(node->bounds.max.y);
-
-    if (node->cspaceSafe) {
-        boxRGBA(renderer,       x1, y1, x2, y2,   0, 200,   0, 160);
-        rectangleRGBA(renderer, x1, y1, x2, y2,   0, 255,   0, 200);
-    } else if (node->cspaceUnsafe) {
-        boxRGBA(renderer,       x1, y1, x2, y2, 255,  60,  60, 160);
-        rectangleRGBA(renderer, x1, y1, x2, y2, 255, 100, 100, 200);
-    } else {
-        // Uncertain: faint outline only
-        rectangleRGBA(renderer, x1, y1, x2, y2, 50, 50, 50, 40);
-    }
+            if (node->data.safe) {
+                boxRGBA(renderer,       x1, y1, x2, y2,   0, 200,   0, 160);
+                rectangleRGBA(renderer, x1, y1, x2, y2,   0, 255,   0, 200);
+            } else if (node->data.unsafe) {
+                boxRGBA(renderer,       x1, y1, x2, y2, 255,  60,  60, 160);
+                rectangleRGBA(renderer, x1, y1, x2, y2, 255, 100, 100, 200);
+            } else {
+                // Uncertain: faint outline only
+                rectangleRGBA(renderer, x1, y1, x2, y2, 50, 50, 50, 40);
+            }
+        });
 }
 
 CSpaceStatus Grid::QueryCSpace(Vec2 t) const
 {
-    if (!m_cspaceRoot) return CSpaceStatus::Uncertain;
-    return QueryNode(m_cspaceRoot.get(), t);
-}
-
-// static
-CSpaceStatus Grid::QueryNode(const QTNode* node, Vec2 t)
-{
-    if (!node || !node->bounds.Contains(t)) return CSpaceStatus::Uncertain;
-    if (node->IsLeaf()) {
-        if (node->cspaceSafe)   return CSpaceStatus::Safe;
-        if (node->cspaceUnsafe) return CSpaceStatus::Unsafe;
-        return CSpaceStatus::Uncertain;
-    }
-    for (const auto& child : node->children) {
-        if (child && child->bounds.Contains(t))
-            return QueryNode(child.get(), t);
-    }
+    if (!m_cspaceTree.HasRoot()) return CSpaceStatus::Uncertain;
+    const CSTree::Node* leaf = CSTree::QueryPoint(m_cspaceTree.GetRoot(), t);
+    if (!leaf) return CSpaceStatus::Uncertain;
+    if (leaf->data.safe)   return CSpaceStatus::Safe;
+    if (leaf->data.unsafe) return CSpaceStatus::Unsafe;
     return CSpaceStatus::Uncertain;
 }
 
@@ -328,80 +281,32 @@ void Grid::DrawOrigin(SDL_Renderer* renderer) const
 
 float Grid::GetMaxDynamicInnerDistance(Vec2 origin) const
 {
-    if (!m_root) return 0.0f;
+    if (!m_occupancyTree.HasRoot()) return 0.0f;
     float maxDist = 0.0f;
-    TraverseMaxDist(m_root.get(), origin, maxDist);
+    OccTree::ForEachLeaf(m_occupancyTree.GetRoot(),
+        [&](const OccTree::Node* node)
+        {
+            if (!node->data.dynamicInner) return;
+            // Check all four corners of this leaf
+            Vec2 corners[4] = {
+                node->bounds.min,
+                { node->bounds.max.x, node->bounds.min.y },
+                node->bounds.max,
+                { node->bounds.min.x, node->bounds.max.y }
+            };
+            for (const auto& c : corners) {
+                float dx = c.x - origin.x;
+                float dy = c.y - origin.y;
+                float d  = std::sqrt(dx * dx + dy * dy);
+                if (d > maxDist) maxDist = d;
+            }
+        });
     return maxDist;
-}
-
-// static
-void Grid::TraverseMaxDist(const QTNode* node, Vec2 origin, float& maxDist)
-{
-    if (!node) return;
-    if (node->IsLeaf()) {
-        if (!node->dynamicInner) return;
-        // Check all four corners of this leaf
-        Vec2 corners[4] = {
-            node->bounds.min,
-            { node->bounds.max.x, node->bounds.min.y },
-            node->bounds.max,
-            { node->bounds.min.x, node->bounds.max.y }
-        };
-        for (const auto& c : corners) {
-            float dx = c.x - origin.x;
-            float dy = c.y - origin.y;
-            float d  = std::sqrt(dx * dx + dy * dy);
-            if (d > maxDist) maxDist = d;
-        }
-        return;
-    }
-    for (const auto& child : node->children)
-        TraverseMaxDist(child.get(), origin, maxDist);
-}
-
-// --- Quadtree utilities -----------------------------------------------------
-
-// static
-void Grid::Subdivide(QTNode* node)
-{
-    for (int q = 0; q < 4; ++q) {
-        auto child = std::make_unique<QTNode>();
-        child->bounds = ChildBounds(node->bounds, q);
-        // Children inherit the parent's occupancy so that subsequent
-        // rasterizations of other objects remain correct
-        child->staticOccupied  = node->staticOccupied;
-        child->staticInner     = node->staticInner;
-        child->staticGray      = node->staticGray;
-        child->dynamicOccupied = node->dynamicOccupied;
-        child->dynamicInner    = node->dynamicInner;
-        child->dynamicGray     = node->dynamicGray;
-        node->children[q] = std::move(child);
-    }
-    // Clear occupancy on parent (now an internal node)
-    node->staticOccupied  = false;
-    node->staticInner     = false;
-    node->staticGray      = false;
-    node->dynamicOccupied = false;
-    node->dynamicInner    = false;
-    node->dynamicGray     = false;
-}
-
-// static
-AABB Grid::ChildBounds(const AABB& parent, int q)
-{
-    float midX = (parent.min.x + parent.max.x) * 0.5f;
-    float midY = (parent.min.y + parent.max.y) * 0.5f;
-    switch (q) {
-        case 0: return { parent.min,               { midX, midY }          }; // NW
-        case 1: return { { midX, parent.min.y },   { parent.max.x, midY }  }; // NE
-        case 2: return { { parent.min.x, midY },   { midX, parent.max.y }  }; // SW
-        default: return { { midX, midY },           parent.max             }; // SE
-    }
 }
 
 // --- Rasterization ----------------------------------------------------------
 
-void Grid::RasterizeObject(QTNode* node, const Object& obj,
+void Grid::RasterizeObject(OccTree::Node* node, const Object& obj,
                            const std::vector<Vec2>& worldVerts)
 {
     if (!node) return;
@@ -430,20 +335,25 @@ void Grid::RasterizeObject(QTNode* node, const Object& obj,
 
         if (inside) {
             // Leaf is fully inside the object: mark as inner and stop
-            if (isDyn) { node->dynamicOccupied = true; node->dynamicInner = true; }
-            else        { node->staticOccupied  = true; node->staticInner  = true; }
+            if (isDyn) { node->data.dynamicOccupied = true; node->data.dynamicInner = true; }
+            else        { node->data.staticOccupied  = true; node->data.staticInner  = true; }
             return;
         }
 
         if (!canSubdivide) {
             // At minimum cell size: boundary cell
-            if (isDyn) { node->dynamicOccupied = true; node->dynamicGray = true; }
-            else        { node->staticOccupied  = true; node->staticGray  = true; }
+            if (isDyn) { node->data.dynamicOccupied = true; node->data.dynamicGray = true; }
+            else        { node->data.staticOccupied  = true; node->data.staticGray  = true; }
             return;
         }
 
-        // Partial overlap: subdivide and recurse
-        Subdivide(node);
+        // Partial overlap: subdivide, children inherit current occupancy state,
+        // then clear parent (it becomes an internal node)
+        OccTree::Subdivide(node,
+            [](OccTree::Node* parent, OccTree::Node* child, int) {
+                child->data = parent->data;
+            });
+        node->data = {};
     }
 
     // Recurse into children (node is now internal)
@@ -572,3 +482,4 @@ bool Grid::PointInPolygon(Vec2 p, const std::vector<Vec2>& verts)
 
     return (crossings & 1) != 0;
 }
+

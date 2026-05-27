@@ -1,9 +1,9 @@
 #pragma once
 
 #include "AABB.h"
+#include "AdaptiveQuadTree.h"
 #include "IDrawable.h"
 
-#include <memory>
 #include <vector>
 #include <cstdint>
 
@@ -16,6 +16,10 @@ enum class CSpaceStatus { Safe, Unsafe, Uncertain };
 // Space is subdivided adaptively: only regions near obstacle boundaries
 // are refined down to minCellSize; empty / fully-interior regions keep
 // their larger parent cell.  No flat grid arrays are used.
+//
+// Tree infrastructure (node allocation, subdivision, child-bounds, traversal,
+// point queries) is delegated to AdaptiveQuadTree<T>.  All geometry and
+// classification logic remains in this class.
 class Grid : public IDrawable
 {
 public:
@@ -66,36 +70,37 @@ public:
 
 private:
     // -----------------------------------------------------------------------
-    // Quadtree node.  Only leaf nodes carry occupancy / C-Space state.
-    // Internal nodes exist solely to partition space; their state flags are
-    // always false and should not be read.
+    // Data stored in occupancy-tree leaves (set by RasterizeObject).
+    // Internal nodes carry default-constructed OccupancyData (all false).
     // -----------------------------------------------------------------------
-    struct QTNode
+    struct OccupancyData
     {
-        AABB bounds;
-
-        // Occupancy (leaf only)
         bool staticOccupied  = false;
         bool staticInner     = false;
         bool staticGray      = false;
         bool dynamicOccupied = false;
         bool dynamicInner    = false;
         bool dynamicGray     = false;
-
-        // C-Space (leaf only, set by BuildCSpaceNode)
-        bool cspaceSafe      = false;
-        bool cspaceUnsafe    = false;
-
-        // Children: null ↔ this node is a leaf
-        std::unique_ptr<QTNode> children[4]; // NW NE SW SE
-        bool IsLeaf() const { return !static_cast<bool>(children[0]); }
     };
 
+    // -----------------------------------------------------------------------
+    // Data stored in C-Space tree leaves (set by BuildCSpaceNode).
+    // Neither flag set ↔ Uncertain.
+    // -----------------------------------------------------------------------
+    struct CSpaceData
+    {
+        bool safe   = false;
+        bool unsafe = false;
+    };
+
+    using OccTree = AdaptiveQuadTree<OccupancyData>;
+    using CSTree  = AdaptiveQuadTree<CSpaceData>;
+
     // Occupancy quadtree (built by Build / RasterizeObject)
-    std::unique_ptr<QTNode> m_root;
+    OccTree m_occupancyTree;
     // C-Space quadtree (built by ComputeCSpace)
-    std::unique_ptr<QTNode> m_cspaceRoot;
-    bool  m_hasCSpace   = false;
+    CSTree  m_cspaceTree;
+    bool    m_hasCSpace   = false;
 
     float m_minCellSize = 20.0f;
     float m_width       = 0.0f;
@@ -106,42 +111,18 @@ private:
     float m_originY     = 0.0f;
     Vec2  m_refScreenPos = {};    // C-Space reference point (centroid of dynamic object)
 
-    // --- Quadtree utilities ------------------------------------------------
-    // Split node into 4 children.  Each child inherits the parent's occupancy
-    // state so that subsequent rasterizations of other objects remain correct.
-    // The parent's occupancy flags are cleared (it is now internal).
-    static void Subdivide(QTNode* node);
-    // Return the AABB of quadrant q (0=NW 1=NE 2=SW 3=SE) of parent.
-    static AABB ChildBounds(const AABB& parent, int q);
-
     // --- Rasterization -----------------------------------------------------
-    // Recursively mark the quadtree to reflect one object's footprint.
-    void RasterizeObject(QTNode* node, const Object& obj,
+    // Recursively mark the occupancy tree to reflect one object's footprint.
+    void RasterizeObject(OccTree::Node* node, const Object& obj,
                          const std::vector<Vec2>& worldVerts);
 
     // --- C-Space computation -----------------------------------------------
-    // Collect occupied/inner leaf AABBs from the occupancy tree.
-    static void CollectLeaves(const QTNode* node,
-                              std::vector<AABB>& dynOcc,
-                              std::vector<AABB>& dynInn,
-                              std::vector<AABB>& statOcc,
-                              std::vector<AABB>& statInn);
     // Recursively classify C-Space tree nodes using precomputed Minkowski
-    // obstacles (minkConservative = safe-test obstacles,
-    //           minkDefinite     = definite-collision obstacles).
-    void BuildCSpaceNode(QTNode* node,
+    // obstacles (minkConservative = conservative-overlap obstacles,
+    //            minkDefinite    = definite-collision obstacles).
+    void BuildCSpaceNode(CSTree::Node* node,
                          const std::vector<AABB>& minkConservative,
                          const std::vector<AABB>& minkDefinite);
-
-    // --- Drawing helpers ---------------------------------------------------
-    static void TraverseDraw(const QTNode* node, SDL_Renderer* renderer);
-    static void TraverseDrawCSpace(const QTNode* node, SDL_Renderer* renderer);
-
-    // --- C-Space query helper ----------------------------------------------
-    static CSpaceStatus QueryNode(const QTNode* node, Vec2 t);
-
-    // --- Max-distance helper -----------------------------------------------
-    static void TraverseMaxDist(const QTNode* node, Vec2 origin, float& maxDist);
 
     // --- Internal geometry helpers -----------------------------------------
     static bool SegmentIntersectsAABB(Vec2 a, Vec2 b, const AABB& box);
