@@ -45,7 +45,7 @@ void Grid::Build(float screenW, float screenH, float cellSize, const std::vector
     m_cols = newCols;
     m_rows = newRows;
 
-    const size_t totalCells = static_cast<size_t>(m_cols) * m_rows;
+    const size_t totalCells = static_cast<size_t>(m_cols) * static_cast<size_t>(m_rows);
 
     m_staticOccupied.assign(totalCells, false);
     m_dynamicOccupied.assign(totalCells, false);
@@ -383,9 +383,6 @@ void Grid::SyncOccupancyArrays()
     m_dynamicGray.assign(totalCells, false);
 
     for (const auto& entry : m_cellEntries) {
-        if (!entry)
-            continue;
-
         const size_t idx = CellIndex(entry->col, entry->row, m_cols);
         m_staticOccupied[idx] = entry->state.staticOccupied;
         m_dynamicOccupied[idx] = entry->state.dynamicOccupied;
