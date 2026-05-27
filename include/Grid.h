@@ -91,7 +91,6 @@ private:
     void RasterizePolygonDaum(const Object& obj, const std::vector<Vec2>& worldVerts);
     void ResetSpatialIndex();
     CellEntry& EnsureCellEntry(int col, int row);
-    CellState QueryCellState(int col, int row) const;
     void SyncOccupancyArrays();
     float m_cellSize = 20.0f;
     int   m_cols     = 0;

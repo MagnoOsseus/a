@@ -371,34 +371,6 @@ Grid::CellEntry& Grid::EnsureCellEntry(int col, int row)
     return *raw;
 }
 
-Grid::CellState Grid::QueryCellState(int col, int row) const
-{
-    CellState state;
-    if (!m_occupancyTree)
-        return state;
-
-    const quadtree::Box<float> cellBox(
-        m_startX + col * m_cellSize,
-        m_startY + row * m_cellSize,
-        m_cellSize,
-        m_cellSize
-    );
-
-    for (CellEntry* entry : m_occupancyTree->query(cellBox)) {
-        if (!entry || entry->col != col || entry->row != row)
-            continue;
-
-        state.staticOccupied  = state.staticOccupied  || entry->state.staticOccupied;
-        state.dynamicOccupied = state.dynamicOccupied || entry->state.dynamicOccupied;
-        state.staticInner     = state.staticInner     || entry->state.staticInner;
-        state.dynamicInner    = state.dynamicInner    || entry->state.dynamicInner;
-        state.staticGray      = state.staticGray      || entry->state.staticGray;
-        state.dynamicGray     = state.dynamicGray     || entry->state.dynamicGray;
-    }
-
-    return state;
-}
-
 void Grid::SyncOccupancyArrays()
 {
     const size_t totalCells = static_cast<size_t>(m_cols) * m_rows;
@@ -410,17 +382,17 @@ void Grid::SyncOccupancyArrays()
     m_staticGray.assign(totalCells, false);
     m_dynamicGray.assign(totalCells, false);
 
-    for (int row = 0; row < m_rows; ++row) {
-        for (int col = 0; col < m_cols; ++col) {
-            const CellState state = QueryCellState(col, row);
-            const size_t idx = CellIndex(col, row, m_cols);
-            m_staticOccupied[idx] = state.staticOccupied;
-            m_dynamicOccupied[idx] = state.dynamicOccupied;
-            m_staticInner[idx] = state.staticInner;
-            m_dynamicInner[idx] = state.dynamicInner;
-            m_staticGray[idx] = state.staticGray;
-            m_dynamicGray[idx] = state.dynamicGray;
-        }
+    for (const auto& entry : m_cellEntries) {
+        if (!entry)
+            continue;
+
+        const size_t idx = CellIndex(entry->col, entry->row, m_cols);
+        m_staticOccupied[idx] = entry->state.staticOccupied;
+        m_dynamicOccupied[idx] = entry->state.dynamicOccupied;
+        m_staticInner[idx] = entry->state.staticInner;
+        m_dynamicInner[idx] = entry->state.dynamicInner;
+        m_staticGray[idx] = entry->state.staticGray;
+        m_dynamicGray[idx] = entry->state.dynamicGray;
     }
 }
 
