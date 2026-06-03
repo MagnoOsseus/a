@@ -154,12 +154,17 @@ void Grid::ComputeCSpace()
     m_refScreenPos = { refX, refY };
 
     const auto sameCellSize = [](const AABB& a, const AABB& b) {
+        // Quadtree splits by halves, so leaf sizes should match exactly;
+        // use a tiny relative epsilon only to absorb float round-off.
+        constexpr float kRelativeSizeEps = 1e-4f;
         const float aw = a.Width();
         const float ah = a.Height();
         const float bw = b.Width();
         const float bh = b.Height();
-        const float scale = std::max({ 1.0f, aw, ah, bw, bh });
-        const float eps = 1e-4f * scale;
+        const float aScale = std::max(aw, ah);
+        const float bScale = std::max(bw, bh);
+        const float scale = std::max(1.0f, std::min(aScale, bScale));
+        const float eps = kRelativeSizeEps * scale;
         return std::abs(aw - bw) <= eps && std::abs(ah - bh) <= eps;
     };
 
