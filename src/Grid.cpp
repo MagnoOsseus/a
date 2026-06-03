@@ -152,7 +152,8 @@ void Grid::ComputeCSpace()
     m_refScreenPos = { refX, refY };
 
     const auto sameCellSize = [](const AABB& a, const AABB& b) {
-        // Quadtree splits by halves, so leaf sizes should match exactly.
+        // Quadtree splits by halves, so leaf sizes should match within
+        // floating-point precision.
         // 1e-4 keeps tolerance far below one pixel while absorbing small
         // float rounding from repeated subdivision/transform steps.
         constexpr float RELATIVE_SIZE_EPSILON = 1e-4f;
@@ -324,6 +325,7 @@ void Grid::RasterizeObject(OccTree::Node* node, const Object& obj,
                            const std::vector<Vec2>& worldVerts)
 {
     if (!node) return;
+    // Degenerate geometry cannot be treated as a filled polygon.
     if (worldVerts.size() < 3) return;
 
     // Quick rejection: does the object's AABB touch this node at all?
