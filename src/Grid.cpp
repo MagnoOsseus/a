@@ -4,6 +4,7 @@
 #include <SDL2/SDL2_gfxPrimitives.h>
 #include <cmath>
 #include <algorithm>
+#include <map>
 
 // --- Helpers ----------------------------------------------------------------
 
@@ -151,52 +152,52 @@ void Grid::ComputeCSpace()
     }
     m_refScreenPos = { refX, refY };
 
-    const auto sameCellSize = [](const AABB& a, const AABB& b) {
-        // Quadtree splits by halves, so leaf sizes should match within
-        // floating-point precision.
-        // 1e-4 keeps tolerance far below one pixel while absorbing small
-        // float rounding from repeated subdivision/transform steps.
-        constexpr float RELATIVE_SIZE_EPSILON = 1e-4f;
-        const float aw = a.Width();
-        const float ah = a.Height();
-        const float bw = b.Width();
-        const float bh = b.Height();
-        const float aScale = std::max(aw, ah);
-        const float bScale = std::max(bw, bh);
-        const float scale = std::max(1.0f, std::max(aScale, bScale));
-        const float eps = RELATIVE_SIZE_EPSILON * scale;
-        return std::abs(aw - bw) <= eps && std::abs(ah - bh) <= eps;
+    // Group cells by (rounded_width, rounded_height) bucket.  Each quadtree
+    // level has one distinct size and consecutive levels differ by a factor of
+    // 2, so consecutive bucket keys are at least minCellSize apart – rounding
+    // to the nearest pixel never conflates different levels.  This reduces
+    // building the Minkowski sets from O(n²) to O(n log n + k) where k is
+    // the number of same-size pairs that actually produce an obstacle AABB.
+    using SizeKey = std::pair<int, int>;
+    auto toKey = [](const AABB& b) -> SizeKey {
+        return { static_cast<int>(std::round(b.Width())),
+                 static_cast<int>(std::round(b.Height())) };
+    };
+
+    auto groupBySize = [&toKey](const std::vector<AABB>& cells) {
+        std::map<SizeKey, std::vector<AABB>> groups;
+        for (const auto& b : cells)
+            groups[toKey(b)].push_back(b);
+        return groups;
+    };
+
+    auto computeMink = [&](const std::vector<AABB>& dynCells,
+                            const std::vector<AABB>& statCells) {
+        auto dynGroups  = groupBySize(dynCells);
+        auto statGroups = groupBySize(statCells);
+        std::vector<AABB> result;
+        for (const auto& [key, dGroup] : dynGroups) {
+            auto it = statGroups.find(key);
+            if (it == statGroups.end()) continue;
+            const auto& sGroup = it->second;
+            result.reserve(result.size() + dGroup.size() * sGroup.size());
+            for (const auto& d : dGroup) {
+                for (const auto& s : sGroup) {
+                    AABB mk = {
+                        { s.min.x - d.max.x + refX, s.min.y - d.max.y + refY },
+                        { s.max.x - d.min.x + refX, s.max.y - d.min.y + refY }
+                    };
+                    if (mk.min.x < mk.max.x && mk.min.y < mk.max.y)
+                        result.push_back(mk);
+                }
+            }
+        }
+        return result;
     };
 
     // Precompute Minkowski obstacle AABBs, comparing only equal-sized cells.
-    std::vector<AABB> minkConservative; // dynOcc × statOcc (same size only)
-    minkConservative.reserve(dynOcc.size() * statOcc.size());
-    for (const auto& d : dynOcc) {
-        for (const auto& s : statOcc) {
-            if (!sameCellSize(d, s)) continue;
-            AABB mk = {
-                { s.min.x - d.max.x + refX, s.min.y - d.max.y + refY },
-                { s.max.x - d.min.x + refX, s.max.y - d.min.y + refY }
-            };
-            if (mk.min.x < mk.max.x && mk.min.y < mk.max.y)
-                minkConservative.push_back(mk);
-        }
-    }
-
-    // Definite collision: dynInn × statInn (same size only)
-    std::vector<AABB> minkDefinite;
-    minkDefinite.reserve(dynInn.size() * statInn.size());
-    for (const auto& d : dynInn) {
-        for (const auto& s : statInn) {
-            if (!sameCellSize(d, s)) continue;
-            AABB mk = {
-                { s.min.x - d.max.x + refX, s.min.y - d.max.y + refY },
-                { s.max.x - d.min.x + refX, s.max.y - d.min.y + refY }
-            };
-            if (mk.min.x < mk.max.x && mk.min.y < mk.max.y)
-                minkDefinite.push_back(mk);
-        }
-    }
+    std::vector<AABB> minkConservative = computeMink(dynOcc, statOcc); // dynOcc × statOcc
+    std::vector<AABB> minkDefinite     = computeMink(dynInn, statInn); // dynInn × statInn
 
     // Build CSpace tree with the same root bounds as the occupancy tree
     m_cspaceTree.Init(m_occupancyTree.GetRoot()->bounds);
