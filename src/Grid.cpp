@@ -154,7 +154,7 @@ void Grid::ComputeCSpace()
     const auto sameCellSize = [](const AABB& a, const AABB& b) {
         // Quadtree splits by halves, so leaf sizes should match exactly.
         // 1e-4 keeps tolerance far below one pixel while absorbing small
-        // float round-off from repeated subdivision/transform steps.
+        // float rounding from repeated subdivision/transform steps.
         constexpr float kRelativeSizeEps = 1e-4f;
         const float aw = a.Width();
         const float ah = a.Height();
@@ -329,7 +329,6 @@ void Grid::RasterizeObject(OccTree::Node* node, const Object& obj,
     if (!node->bounds.Intersects(obj.GetAABB())) return;
 
     const bool   isDyn    = obj.IsDynamic();
-    if (worldVerts.size() < 3) return;
 
     float halfW = node->bounds.Width()  * 0.5f;
     float halfH = node->bounds.Height() * 0.5f;
