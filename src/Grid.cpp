@@ -4,6 +4,7 @@
 #include <SDL2/SDL2_gfxPrimitives.h>
 #include <cmath>
 #include <algorithm>
+#include <map>
 
 // --- Helpers ----------------------------------------------------------------
 
@@ -43,17 +44,15 @@ void Grid::Build(float screenW, float screenH, float minCellSize,
     // Initialise root node covering the screen area
     m_occupancyTree.Init({ { m_startX, m_startY }, { screenW, screenH } });
 
-    // Rasterize every object into the quadtree
+    // Rasterize every object into the quadtree using polygon-style tests.
     for (const auto& obj : objects) {
         std::vector<Vec2> worldVerts;
         if (obj.IsDynamic()) {
             Object rotated = obj.GetRotated(angleDegrees);
-            if (rotated.GetShapeType() != ShapeType::Circle)
-                worldVerts = rotated.GetWorldVertices();
+            worldVerts = rotated.GetWorldVertices();
             RasterizeObject(m_occupancyTree.GetRoot(), rotated, worldVerts);
         } else {
-            if (obj.GetShapeType() != ShapeType::Circle)
-                worldVerts = obj.GetWorldVertices();
+            worldVerts = obj.GetWorldVertices();
             RasterizeObject(m_occupancyTree.GetRoot(), obj, worldVerts);
         }
     }
@@ -153,33 +152,61 @@ void Grid::ComputeCSpace()
     }
     m_refScreenPos = { refX, refY };
 
-    // Precompute Minkowski obstacle AABBs.
-    std::vector<AABB> minkConservative; // dynOcc × statOcc
-    minkConservative.reserve(dynOcc.size() * statOcc.size());
-    for (const auto& d : dynOcc) {
-        for (const auto& s : statOcc) {
-            AABB mk = {
-                { s.min.x - d.max.x + refX, s.min.y - d.max.y + refY },
-                { s.max.x - d.min.x + refX, s.max.y - d.min.y + refY }
-            };
-            if (mk.min.x < mk.max.x && mk.min.y < mk.max.y)
-                minkConservative.push_back(mk);
-        }
-    }
+    // Group cells by (rounded_width, rounded_height) bucket.  Each quadtree
+    // level has one distinct size and consecutive levels differ by a factor of
+    // 2, so consecutive bucket keys are at least minCellSize apart – rounding
+    // to the nearest pixel never conflates different levels.  This reduces
+    // building the Minkowski sets from O(n²) to O(n log n + k) where k is
+    // the number of same-size pairs that actually produce an obstacle AABB.
+    using SizeKey = std::pair<int, int>;
+    auto toKey = [](const AABB& b) -> SizeKey {
+        return { static_cast<int>(std::round(b.Width())),
+                 static_cast<int>(std::round(b.Height())) };
+    };
 
-    // Definite collision: dynInn × statInn
-    std::vector<AABB> minkDefinite;
-    minkDefinite.reserve(dynInn.size() * statInn.size());
-    for (const auto& d : dynInn) {
-        for (const auto& s : statInn) {
-            AABB mk = {
-                { s.min.x - d.max.x + refX, s.min.y - d.max.y + refY },
-                { s.max.x - d.min.x + refX, s.max.y - d.min.y + refY }
-            };
-            if (mk.min.x < mk.max.x && mk.min.y < mk.max.y)
-                minkDefinite.push_back(mk);
+    auto groupBySize = [&toKey](const std::vector<AABB>& cells) {
+        std::map<SizeKey, std::vector<AABB>> groups;
+        for (const auto& b : cells)
+            groups[toKey(b)].push_back(b);
+        return groups;
+    };
+
+    auto computeMink = [&](const std::vector<AABB>& dynCells,
+                            const std::vector<AABB>& statCells) {
+        auto dynGroups  = groupBySize(dynCells);
+        auto statGroups = groupBySize(statCells);
+
+        // Pre-compute total capacity to avoid repeated reallocations.
+        std::size_t totalPairs = 0;
+        for (const auto& [key, dGroup] : dynGroups) {
+            auto it = statGroups.find(key);
+            if (it != statGroups.end())
+                totalPairs += dGroup.size() * it->second.size();
         }
-    }
+
+        std::vector<AABB> result;
+        result.reserve(totalPairs);
+        for (const auto& [key, dGroup] : dynGroups) {
+            auto it = statGroups.find(key);
+            if (it == statGroups.end()) continue;
+            const auto& sGroup = it->second;
+            for (const auto& d : dGroup) {
+                for (const auto& s : sGroup) {
+                    AABB mk = {
+                        { s.min.x - d.max.x + refX, s.min.y - d.max.y + refY },
+                        { s.max.x - d.min.x + refX, s.max.y - d.min.y + refY }
+                    };
+                    if (mk.min.x < mk.max.x && mk.min.y < mk.max.y)
+                        result.push_back(mk);
+                }
+            }
+        }
+        return result;
+    };
+
+    // Precompute Minkowski obstacle AABBs, comparing only equal-sized cells.
+    std::vector<AABB> minkConservative = computeMink(dynOcc, statOcc); // dynOcc × statOcc
+    std::vector<AABB> minkDefinite     = computeMink(dynInn, statInn); // dynInn × statInn
 
     // Build CSpace tree with the same root bounds as the occupancy tree
     m_cspaceTree.Init(m_occupancyTree.GetRoot()->bounds);
@@ -308,13 +335,12 @@ void Grid::RasterizeObject(OccTree::Node* node, const Object& obj,
                            const std::vector<Vec2>& worldVerts)
 {
     if (!node) return;
+    // Degenerate geometry cannot be treated as a filled polygon.
+    if (worldVerts.size() < 3) return;
 
     // Quick rejection: does the object's AABB touch this node at all?
     if (!node->bounds.Intersects(obj.GetAABB())) return;
 
-    const bool   isCircle = (obj.GetShapeType() == ShapeType::Circle);
-    const Vec2   center   = obj.GetPosition();
-    const float  radius   = obj.GetRadius();
     const bool   isDyn    = obj.IsDynamic();
 
     float halfW = node->bounds.Width()  * 0.5f;
@@ -322,14 +348,10 @@ void Grid::RasterizeObject(OccTree::Node* node, const Object& obj,
     bool canSubdivide = (halfW >= m_minCellSize && halfH >= m_minCellSize);
 
     if (node->IsLeaf()) {
-        bool hit = isCircle
-            ? CellOverlapsCircle(node->bounds, center, radius)
-            : CellOverlapsPolygon(node->bounds, worldVerts);
+        bool hit = CellOverlapsPolygon(node->bounds, worldVerts);
         if (!hit) return;
 
-        bool inside = isCircle
-            ? CellInsideCircle(node->bounds, center, radius)
-            : CellInsidePolygon(node->bounds, worldVerts);
+        bool inside = CellInsidePolygon(node->bounds, worldVerts);
 
         if (inside) {
             // Leaf is fully inside the object: mark as inner and stop
@@ -480,4 +502,3 @@ bool Grid::PointInPolygon(Vec2 p, const std::vector<Vec2>& verts)
 
     return (crossings & 1) != 0;
 }
-
