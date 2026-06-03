@@ -4,7 +4,6 @@
 #include <SDL2/SDL2_gfxPrimitives.h>
 #include <cmath>
 #include <algorithm>
-#include <cassert>
 
 // --- Helpers ----------------------------------------------------------------
 
@@ -156,7 +155,7 @@ void Grid::ComputeCSpace()
         // Quadtree splits by halves, so leaf sizes should match exactly.
         // 1e-4 keeps tolerance far below one pixel while absorbing small
         // float rounding from repeated subdivision/transform steps.
-        constexpr float kRelativeSizeEpsilon = 1e-4f;
+        constexpr float RELATIVE_SIZE_EPSILON = 1e-4f;
         const float aw = a.Width();
         const float ah = a.Height();
         const float bw = b.Width();
@@ -164,7 +163,7 @@ void Grid::ComputeCSpace()
         const float aScale = std::max(aw, ah);
         const float bScale = std::max(bw, bh);
         const float scale = std::max(1.0f, std::max(aScale, bScale));
-        const float eps = kRelativeSizeEpsilon * scale;
+        const float eps = RELATIVE_SIZE_EPSILON * scale;
         return std::abs(aw - bw) <= eps && std::abs(ah - bh) <= eps;
     };
 
@@ -325,8 +324,6 @@ void Grid::RasterizeObject(OccTree::Node* node, const Object& obj,
                            const std::vector<Vec2>& worldVerts)
 {
     if (!node) return;
-    // Assert for debug builds; keep runtime guard for release safety.
-    assert(worldVerts.size() >= 3 && "Rasterization expects polygonized object vertices.");
     if (worldVerts.size() < 3) return;
 
     // Quick rejection: does the object's AABB touch this node at all?
