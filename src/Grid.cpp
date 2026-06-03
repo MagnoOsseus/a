@@ -175,12 +175,21 @@ void Grid::ComputeCSpace()
                             const std::vector<AABB>& statCells) {
         auto dynGroups  = groupBySize(dynCells);
         auto statGroups = groupBySize(statCells);
+
+        // Pre-compute total capacity to avoid repeated reallocations.
+        std::size_t totalPairs = 0;
+        for (const auto& [key, dGroup] : dynGroups) {
+            auto it = statGroups.find(key);
+            if (it != statGroups.end())
+                totalPairs += dGroup.size() * it->second.size();
+        }
+
         std::vector<AABB> result;
+        result.reserve(totalPairs);
         for (const auto& [key, dGroup] : dynGroups) {
             auto it = statGroups.find(key);
             if (it == statGroups.end()) continue;
             const auto& sGroup = it->second;
-            result.reserve(result.size() + dGroup.size() * sGroup.size());
             for (const auto& d : dGroup) {
                 for (const auto& s : sGroup) {
                     AABB mk = {
