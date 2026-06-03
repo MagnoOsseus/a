@@ -193,10 +193,14 @@ void App::Update()
         float panelW = static_cast<float>(m_windowW / 2);
         float panelH = static_cast<float>(m_windowH) - m_toolbarH;
 
-        // Get or create the grid for the current angle
+        // Get or create the grid for the current angle.
+        // Only rebuild if C-Space hasn't been computed yet; rebuilding would
+        // reset m_hasCSpace and erase the C-Space tree.
         float effCellSize = m_cellSize / std::pow(2.0f, static_cast<float>(m_refinementLevels));
         Grid& currentGrid = m_layers[m_currentAngle];
-        currentGrid.Build(panelW, panelH, effCellSize, m_objects, m_gridOrigin, static_cast<float>(m_currentAngle));
+        if (!currentGrid.HasCSpace()) {
+            currentGrid.Build(panelW, panelH, effCellSize, m_objects, m_gridOrigin, static_cast<float>(m_currentAngle));
+        }
 
         // Recompute angular step using the smallest cell size
         float d = currentGrid.GetMaxDynamicInnerDistance(m_gridOrigin);
