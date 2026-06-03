@@ -43,17 +43,15 @@ void Grid::Build(float screenW, float screenH, float minCellSize,
     // Initialise root node covering the screen area
     m_occupancyTree.Init({ { m_startX, m_startY }, { screenW, screenH } });
 
-    // Rasterize every object into the quadtree
+    // Rasterize every object into the quadtree using polygon-style tests.
     for (const auto& obj : objects) {
         std::vector<Vec2> worldVerts;
         if (obj.IsDynamic()) {
             Object rotated = obj.GetRotated(angleDegrees);
-            if (rotated.GetShapeType() != ShapeType::Circle)
-                worldVerts = rotated.GetWorldVertices();
+            worldVerts = rotated.GetWorldVertices();
             RasterizeObject(m_occupancyTree.GetRoot(), rotated, worldVerts);
         } else {
-            if (obj.GetShapeType() != ShapeType::Circle)
-                worldVerts = obj.GetWorldVertices();
+            worldVerts = obj.GetWorldVertices();
             RasterizeObject(m_occupancyTree.GetRoot(), obj, worldVerts);
         }
     }
@@ -330,24 +328,18 @@ void Grid::RasterizeObject(OccTree::Node* node, const Object& obj,
     // Quick rejection: does the object's AABB touch this node at all?
     if (!node->bounds.Intersects(obj.GetAABB())) return;
 
-    const bool   isCircle = (obj.GetShapeType() == ShapeType::Circle);
-    const Vec2   center   = obj.GetPosition();
-    const float  radius   = obj.GetRadius();
     const bool   isDyn    = obj.IsDynamic();
+    if (worldVerts.size() < 3) return;
 
     float halfW = node->bounds.Width()  * 0.5f;
     float halfH = node->bounds.Height() * 0.5f;
     bool canSubdivide = (halfW >= m_minCellSize && halfH >= m_minCellSize);
 
     if (node->IsLeaf()) {
-        bool hit = isCircle
-            ? CellOverlapsCircle(node->bounds, center, radius)
-            : CellOverlapsPolygon(node->bounds, worldVerts);
+        bool hit = CellOverlapsPolygon(node->bounds, worldVerts);
         if (!hit) return;
 
-        bool inside = isCircle
-            ? CellInsideCircle(node->bounds, center, radius)
-            : CellInsidePolygon(node->bounds, worldVerts);
+        bool inside = CellInsidePolygon(node->bounds, worldVerts);
 
         if (inside) {
             // Leaf is fully inside the object: mark as inner and stop
