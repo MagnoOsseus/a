@@ -153,11 +153,22 @@ void Grid::ComputeCSpace()
     }
     m_refScreenPos = { refX, refY };
 
-    // Precompute Minkowski obstacle AABBs.
-    std::vector<AABB> minkConservative; // dynOcc × statOcc
+    const auto sameCellSize = [](const AABB& a, const AABB& b) {
+        const float aw = a.Width();
+        const float ah = a.Height();
+        const float bw = b.Width();
+        const float bh = b.Height();
+        const float scale = std::max({ 1.0f, aw, ah, bw, bh });
+        const float eps = 1e-4f * scale;
+        return std::abs(aw - bw) <= eps && std::abs(ah - bh) <= eps;
+    };
+
+    // Precompute Minkowski obstacle AABBs, comparing only equal-sized cells.
+    std::vector<AABB> minkConservative; // dynOcc × statOcc (same size only)
     minkConservative.reserve(dynOcc.size() * statOcc.size());
     for (const auto& d : dynOcc) {
         for (const auto& s : statOcc) {
+            if (!sameCellSize(d, s)) continue;
             AABB mk = {
                 { s.min.x - d.max.x + refX, s.min.y - d.max.y + refY },
                 { s.max.x - d.min.x + refX, s.max.y - d.min.y + refY }
@@ -167,11 +178,12 @@ void Grid::ComputeCSpace()
         }
     }
 
-    // Definite collision: dynInn × statInn
+    // Definite collision: dynInn × statInn (same size only)
     std::vector<AABB> minkDefinite;
     minkDefinite.reserve(dynInn.size() * statInn.size());
     for (const auto& d : dynInn) {
         for (const auto& s : statInn) {
+            if (!sameCellSize(d, s)) continue;
             AABB mk = {
                 { s.min.x - d.max.x + refX, s.min.y - d.max.y + refY },
                 { s.max.x - d.min.x + refX, s.max.y - d.min.y + refY }
@@ -480,4 +492,3 @@ bool Grid::PointInPolygon(Vec2 p, const std::vector<Vec2>& verts)
 
     return (crossings & 1) != 0;
 }
-
