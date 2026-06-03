@@ -4,6 +4,7 @@
 #include <SDL2/SDL2_gfxPrimitives.h>
 #include <cmath>
 #include <algorithm>
+#include <cassert>
 
 // --- Helpers ----------------------------------------------------------------
 
@@ -324,6 +325,8 @@ void Grid::RasterizeObject(OccTree::Node* node, const Object& obj,
                            const std::vector<Vec2>& worldVerts)
 {
     if (!node) return;
+    assert(worldVerts.size() >= 3 && "Rasterization expects polygonized object vertices.");
+    if (worldVerts.size() < 3) return;
 
     // Quick rejection: does the object's AABB touch this node at all?
     if (!node->bounds.Intersects(obj.GetAABB())) return;
