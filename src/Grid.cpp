@@ -4,7 +4,6 @@
 #include <SDL2/SDL2_gfxPrimitives.h>
 #include <cmath>
 #include <algorithm>
-#include <map>
 
 // --- Helpers ----------------------------------------------------------------
 
@@ -152,53 +151,18 @@ void Grid::ComputeCSpace()
     }
     m_refScreenPos = { refX, refY };
 
-    // Group cells by (rounded_width, rounded_height) bucket.  Each quadtree
-    // level has one distinct size and consecutive levels differ by a factor of
-    // 2, so consecutive bucket keys are at least minCellSize apart – rounding
-    // to the nearest pixel never conflates different levels.  This reduces
-    // building the Minkowski sets from O(n²) to O(n log n + k) where k is
-    // the number of same-size pairs that actually produce an obstacle AABB.
-    using SizeKey = std::pair<int, int>;
-    auto toKey = [](const AABB& b) -> SizeKey {
-        return { static_cast<int>(std::round(b.Width())),
-                 static_cast<int>(std::round(b.Height())) };
-    };
-
-    auto groupBySize = [&toKey](const std::vector<AABB>& cells) {
-        std::map<SizeKey, std::vector<AABB>> groups;
-        for (const auto& b : cells)
-            groups[toKey(b)].push_back(b);
-        return groups;
-    };
-
     auto computeMink = [&](const std::vector<AABB>& dynCells,
                             const std::vector<AABB>& statCells) {
-        auto dynGroups  = groupBySize(dynCells);
-        auto statGroups = groupBySize(statCells);
-
-        // Pre-compute total capacity to avoid repeated reallocations.
-        std::size_t totalPairs = 0;
-        for (const auto& [key, dGroup] : dynGroups) {
-            auto it = statGroups.find(key);
-            if (it != statGroups.end())
-                totalPairs += dGroup.size() * it->second.size();
-        }
-
         std::vector<AABB> result;
-        result.reserve(totalPairs);
-        for (const auto& [key, dGroup] : dynGroups) {
-            auto it = statGroups.find(key);
-            if (it == statGroups.end()) continue;
-            const auto& sGroup = it->second;
-            for (const auto& d : dGroup) {
-                for (const auto& s : sGroup) {
-                    AABB mk = {
-                        { s.min.x - d.max.x + refX, s.min.y - d.max.y + refY },
-                        { s.max.x - d.min.x + refX, s.max.y - d.min.y + refY }
-                    };
-                    if (mk.min.x < mk.max.x && mk.min.y < mk.max.y)
-                        result.push_back(mk);
-                }
+        result.reserve(dynCells.size() * statCells.size());
+        for (const auto& d : dynCells) {
+            for (const auto& s : statCells) {
+                AABB mk = {
+                    { s.min.x - d.max.x + refX, s.min.y - d.max.y + refY },
+                    { s.max.x - d.min.x + refX, s.max.y - d.min.y + refY }
+                };
+                if (mk.min.x < mk.max.x && mk.min.y < mk.max.y)
+                    result.push_back(mk);
             }
         }
         return result;
