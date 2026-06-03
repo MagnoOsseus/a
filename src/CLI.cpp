@@ -319,17 +319,18 @@ void CLI::CmdCompute()
         }
     }
 
+    const float effCellSize = m_cellSize
+                            / std::pow(2.0f, static_cast<float>(m_refinementLevels));
+
     // Compute angular step via the base layer (angle = 0)
     {
         Grid baseGrid;
-        baseGrid.Build(m_workspaceW, m_workspaceH, m_cellSize,
+        baseGrid.Build(m_workspaceW, m_workspaceH, effCellSize,
                        m_objects, m_gridOrigin, 0.0f);
 
         float d = baseGrid.GetMaxDynamicInnerDistance(m_gridOrigin);
         if (d > 0.0f) {
-            float smallestCell = m_cellSize
-                               / std::pow(2.0f, static_cast<float>(m_refinementLevels));
-            float stepRad = smallestCell / (2.0f * d);
+            float stepRad = effCellSize / (2.0f * d);
             m_angleDeg = stepRad * (180.0f / static_cast<float>(std::numbers::pi));
         } else {
             m_angleDeg = 0.0f;
@@ -358,7 +359,7 @@ void CLI::CmdCompute()
 
     for (int angle : m_angleSteps) {
         Grid& g = m_layers[angle];
-        g.Build(m_workspaceW, m_workspaceH, m_cellSize,
+        g.Build(m_workspaceW, m_workspaceH, effCellSize,
                 m_objects, m_gridOrigin, static_cast<float>(angle));
         g.ComputeCSpace();
 
